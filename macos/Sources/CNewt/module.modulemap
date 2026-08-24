@@ -1,0 +1,4 @@
+module CNewt {
+    header "include/newt.h"
+    export *
+}

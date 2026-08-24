@@ -1,0 +1,21 @@
+[workspace]
+resolver = "2"
+members = ["newt-core", "newt-ffi", "newt-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.85"
+
+[workspace.dependencies]
+newt-core = { path = "newt-core" }
+
+# Pinned exactly: 0.x crate, API churns between patch releases.
+alacritty_terminal = "=0.26.0"
+portable-pty = "0.9"
+vte = { version = "0.15", features = ["ansi"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

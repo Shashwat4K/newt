@@ -1,0 +1,10 @@
+[package]
+name = "newt-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Headless driver for newt-core; exercises the terminal with no UI."
+
+[dependencies]
+newt-core = { workspace = true }

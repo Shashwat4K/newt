@@ -1,0 +1,12 @@
+[package]
+name = "newt-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Portable terminal core for newt: PTY, emulation, screen model, snapshots."
+
+[dependencies]
+alacritty_terminal = { workspace = true }
+portable-pty = { workspace = true }
+vte = { workspace = true }

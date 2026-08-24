@@ -1,2 +1,18 @@
+# Rust
+core/target/
+
+# SwiftPM
+macos/.build/
+macos/lib/
+
+# Bundles
+*.app
+
+# macOS
+.DS_Store
+
+# Working notes (see CLAUDE.md: plans and logs live here)
 docs/
 
+# Agent guidance, kept local
+CLAUDE.md
