@@ -19,12 +19,14 @@ pub mod error;
 pub mod events;
 pub mod palette;
 pub mod session;
+pub mod snapshot;
 
 pub use emulator::{Emulator, SizeInCells, DEFAULT_SCROLLBACK_LINES};
 pub use error::{Error, Result};
 pub use events::EventSink;
 pub use palette::Rgb;
 pub use session::{Direction, Session, SessionConfig, Trace};
+pub use snapshot::{Cell, Color, Cursor, DamagedRow, Snapshot};
 
 #[cfg(test)]
 mod tests {

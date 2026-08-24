@@ -4,9 +4,19 @@ include_guard = "NEWT_H"
 autogen_warning = "/* This file is generated at build time; edits will be overwritten. */"
 cpp_compat = true
 style = "type"
+documentation_style = "c99"
 
 [export]
-prefix = ""
+# Core's type names are correct for a Rust library but far too generic for a C
+# header, so they are renamed individually rather than with a blanket prefix —
+# a prefix would also mangle the already-prefixed types and constants here.
+[export.rename]
+"Cell" = "NewtCell"
+"Color" = "NewtColor"
+"Cursor" = "NewtCursor"
+"DamagedRow" = "NewtDamagedRow"
 
 [parse]
-parse_deps = false
+# The cell, cursor, and damage types live in newt-core.
+parse_deps = true
+include = ["newt-core"]

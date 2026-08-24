@@ -13,6 +13,7 @@ fn main() {
         .unwrap_or_else(|_| crate_dir.join("../../macos/Sources/CNewt/include/newt.h"));
 
     println!("cargo:rerun-if-changed=src/lib.rs");
+    println!("cargo:rerun-if-changed=../newt-core/src/snapshot.rs");
     println!("cargo:rerun-if-changed=cbindgen.toml");
 
     match cbindgen::generate(&crate_dir) {

@@ -10,17 +10,203 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+#define NEWT_FLAG_BOLD (1 << 0)
+
+#define NEWT_FLAG_ITALIC (1 << 1)
+
+#define NEWT_FLAG_UNDERLINE (1 << 2)
+
+#define NEWT_FLAG_DOUBLE_UNDERLINE (1 << 3)
+
+#define NEWT_FLAG_UNDERCURL (1 << 4)
+
+#define NEWT_FLAG_DOTTED_UNDERLINE (1 << 5)
+
+#define NEWT_FLAG_DASHED_UNDERLINE (1 << 6)
+
+#define NEWT_FLAG_STRIKEOUT (1 << 7)
+
+#define NEWT_FLAG_DIM (1 << 8)
+
+#define NEWT_FLAG_HIDDEN (1 << 9)
+
+#define NEWT_FLAG_WIDE (1 << 10)
+
+#define NEWT_FLAG_WIDE_SPACER (1 << 11)
+
+#define NEWT_FLAG_WRAPLINE (1 << 12)
+
+#define NEWT_CURSOR_BLOCK 0
+
+#define NEWT_CURSOR_UNDERLINE 1
+
+#define NEWT_CURSOR_BEAM 2
+
+#define NEWT_CURSOR_HOLLOW_BLOCK 3
+
+#define NEWT_CURSOR_HIDDEN 4
+
+// A running terminal session. Opaque to C.
+typedef struct NewtSession NewtSession;
+
+// An opaque RGB triple. Alpha is deliberately absent: terminal cells are
+// opaque, and window transparency is a shell concern.
+typedef struct {
+  uint8_t r;
+  uint8_t g;
+  uint8_t b;
+  // Explicit padding so the layout is identical on every compiler.
+  uint8_t _reserved;
+} NewtColor;
+#define NewtColor_BLACK (NewtColor){ .r = 0, .g = 0, .b = 0, ._reserved = 0 }
+
+// One screen cell.
+//
+// `#[repr(C)]` because this array is handed to the renderer as-is; a
+// conversion pass per frame would be the single most wasteful thing in the
+// pipeline.
+typedef struct {
+  // Primary character. Zero means empty.
+  uint32_t codepoint;
+  // Offset into [`Snapshot::combining`] for this cell's combining marks.
+  uint32_t combining_offset;
+  // Number of combining marks belonging to this cell.
+  uint16_t combining_len;
+  // Bitwise OR of [`flags`].
+  uint16_t flags;
+  NewtColor fg;
+  NewtColor bg;
+} NewtCell;
+
+// Where the cursor is and how to draw it.
+typedef struct {
+  uint16_t col;
+  uint16_t row;
+  // One of [`cursor_shape`].
+  uint8_t shape;
+  // False when the cursor is hidden or scrolled out of the viewport.
+  bool visible;
+} NewtCursor;
+
+// A run of changed cells on one row, as half-open `[left, right]` inclusive
+// columns, matching the engine's damage bounds.
+typedef struct {
+  uint32_t row;
+  uint32_t left;
+  uint32_t right;
+} NewtDamagedRow;
+
+// Borrowed view of one frame. See the module docs for lifetimes.
+typedef struct {
+  uint16_t cols;
+  uint16_t rows;
+  // `rows * cols` cells, row-major.
+  const NewtCell *cells;
+  uintptr_t cell_count;
+  // Combining marks, indexed by each cell's `combining_offset`.
+  const uint32_t *combining;
+  uintptr_t combining_count;
+  NewtCursor cursor;
+  // Rows changed since the previous snapshot; ignore when `full_damage`.
+  const NewtDamagedRow *damage;
+  uintptr_t damage_count;
+  bool full_damage;
+  // Lines the viewport is scrolled back.
+  uint32_t display_offset;
+  // Lines currently held in scrollback.
+  uint32_t history_len;
+} NewtSnapshot;
+
 #ifdef __cplusplus
 extern "C" {
 #endif // __cplusplus
 
-/**
- * Version of the core, as a NUL-terminated static string.
- *
- * The returned pointer is valid for the lifetime of the process and must not
- * be freed by the caller.
- */
+// Version of the core, as a NUL-terminated static string.
+//
+// The returned pointer is valid for the lifetime of the process and must not
+// be freed by the caller.
 const char *newt_version(void);
+
+// Message for the most recent failure on this thread, or null if none.
+//
+// Valid until the next failing call on the same thread.
+const char *newt_last_error(void);
+
+// Start a session running `shell` (null for the user's login shell) in `cwd`
+// (null for the process working directory).
+//
+// Returns null on failure; see [`newt_last_error`].
+//
+// # Safety
+//
+// `shell` and `cwd`, when non-null, must point to NUL-terminated strings.
+NewtSession *newt_session_new(uint16_t cols,
+                              uint16_t rows,
+                              const char *shell,
+                              const char *cwd,
+                              uint32_t scrollback_lines);
+
+// Release a session. Passing null is a no-op; passing the same handle twice is
+// undefined behavior.
+//
+// # Safety
+//
+// `handle` must come from [`newt_session_new`] and not have been freed.
+void newt_session_free(NewtSession *handle);
+
+// Send input to the child process.
+//
+// # Safety
+//
+// `handle` must be live, and `bytes` must point to at least `len` bytes.
+bool newt_session_write(NewtSession *handle, const uint8_t *bytes, uintptr_t len);
+
+// Resize the terminal and inform the child.
+//
+// # Safety
+//
+// `handle` must be live.
+bool newt_session_resize(NewtSession *handle, uint16_t cols, uint16_t rows);
+
+// Scroll the viewport by `delta` lines; positive scrolls back into history.
+//
+// # Safety
+//
+// `handle` must be live.
+bool newt_session_scroll(NewtSession *handle, int32_t delta);
+
+// Report cell metrics so the terminal can answer pixel-size queries.
+//
+// # Safety
+//
+// `handle` must be live.
+bool newt_session_set_cell_size(NewtSession *handle, uint16_t width, uint16_t height);
+
+// Fill `out` with the current screen.
+//
+// The pointers written into `out` borrow session-owned buffers and are valid
+// until the next snapshot call on this session, or until it is freed.
+//
+// # Safety
+//
+// `handle` must be live and `out` must point to a writable `NewtSnapshot`.
+bool newt_session_snapshot(NewtSession *handle, NewtSnapshot *out);
+
+// Whether the child process has closed the terminal.
+//
+// # Safety
+//
+// `handle` must be live.
+bool newt_session_has_exited(NewtSession *handle);
+
+// Window title most recently set by the child, or null if none.
+//
+// Valid until the next call to this function on the same session.
+//
+// # Safety
+//
+// `handle` must be live.
+const char *newt_session_title(NewtSession *handle);
 
 #ifdef __cplusplus
 }  // extern "C"

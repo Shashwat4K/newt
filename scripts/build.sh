@@ -28,4 +28,4 @@ cp "$REPO_ROOT/core/target/$CONFIG/libnewt_ffi.a" "$REPO_ROOT/macos/lib/libnewt_
 echo "==> swift build ($CONFIG)"
 swift build --package-path "$REPO_ROOT/macos" ${SWIFT_FLAGS[@]+"${SWIFT_FLAGS[@]}"}
 
-echo "==> ok: $("$REPO_ROOT/macos/.build/$CONFIG/NewtApp")"
+echo "==> built $REPO_ROOT/macos/.build/$CONFIG/NewtApp"
