@@ -360,6 +360,118 @@ mod tests {
         Emulator::new(SizeInCells::new(20, 5), 100)
     }
 
+    // --- resize and reflow ---
+    //
+    // Reflow policy, inherited from the engine and pinned here because it is
+    // one of the two hardest correctness problems in a terminal and must not
+    // change silently: the primary screen rewraps, the alternate screen does
+    // not. Full-screen programs redraw themselves on resize, so rewrapping
+    // their grid would corrupt what they drew.
+
+    #[test]
+    fn narrowing_rewraps_a_long_line() {
+        let mut e = Emulator::new(SizeInCells::new(20, 4), 100);
+        e.advance(b"abcdefghijklmnopqrstuvwxyz0123456789");
+        assert_eq!(e.visible_text()[0], "abcdefghijklmnopqrst");
+
+        e.resize(SizeInCells::new(10, 4));
+
+        // The text rewrapped to the narrower width; what no longer fits in the
+        // viewport moved into scrollback rather than being discarded.
+        assert_eq!(e.visible_text()[0], "uvwxyz0123");
+        assert_eq!(e.visible_text()[1], "456789");
+        assert_eq!(e.snapshot().history_len, 2);
+    }
+
+    /// The round trip has to be lossless, or every window resize slowly
+    /// destroys scrollback.
+    #[test]
+    fn widening_restores_the_original_wrapping() {
+        let mut e = Emulator::new(SizeInCells::new(20, 4), 100);
+        e.advance(b"abcdefghijklmnopqrstuvwxyz0123456789");
+        let before = e.visible_text();
+
+        e.resize(SizeInCells::new(10, 4));
+        e.resize(SizeInCells::new(20, 4));
+
+        assert_eq!(e.visible_text(), before, "reflow round trip lost content");
+    }
+
+    #[test]
+    fn shrinking_rows_moves_lines_into_scrollback() {
+        let mut e = Emulator::new(SizeInCells::new(20, 5), 100);
+        for line in 0..4 {
+            e.advance(format!("line{line}\r\n").as_bytes());
+        }
+        assert_eq!(e.snapshot().history_len, 0);
+
+        e.resize(SizeInCells::new(20, 2));
+
+        assert_eq!(e.visible_text()[0], "line3");
+        assert_eq!(
+            e.snapshot().history_len,
+            3,
+            "lines were dropped, not scrolled back"
+        );
+    }
+
+    #[test]
+    fn growing_rows_pulls_lines_back_out_of_scrollback() {
+        let mut e = Emulator::new(SizeInCells::new(20, 5), 100);
+        for line in 0..4 {
+            e.advance(format!("line{line}\r\n").as_bytes());
+        }
+        let before = e.visible_text();
+
+        e.resize(SizeInCells::new(20, 2));
+        e.resize(SizeInCells::new(20, 5));
+
+        assert_eq!(e.visible_text(), before, "rows did not come back intact");
+        assert_eq!(e.snapshot().history_len, 0);
+    }
+
+    /// Deliberately *not* rewrapped: a full-screen program redraws itself after
+    /// a resize, and rewrapping its grid would corrupt the frame it drew.
+    #[test]
+    fn the_alternate_screen_is_not_rewrapped() {
+        let mut e = Emulator::new(SizeInCells::new(20, 4), 100);
+        e.advance(b"\x1b[?1049habcdefghijklmnopqrstuvwxyz");
+        assert_eq!(e.visible_text()[0], "abcdefghijklmnopqrst");
+
+        e.resize(SizeInCells::new(10, 4));
+
+        // Truncated to the new width, not rewrapped onto the following line.
+        assert_eq!(e.visible_text()[0], "abcdefghij");
+        assert_eq!(e.visible_text()[1], "uvwxyz");
+    }
+
+    #[test]
+    fn resizing_to_the_same_size_changes_nothing() {
+        let mut e = Emulator::new(SizeInCells::new(20, 4), 100);
+        e.advance(b"unchanged");
+        let before = e.visible_text();
+
+        e.resize(SizeInCells::new(20, 4));
+
+        assert_eq!(e.visible_text(), before);
+        assert_eq!(e.size(), SizeInCells::new(20, 4));
+    }
+
+    #[test]
+    fn the_cursor_stays_within_the_grid_after_shrinking() {
+        let mut e = Emulator::new(SizeInCells::new(40, 10), 100);
+        e.advance(b"\x1b[9;30Hx");
+
+        e.resize(SizeInCells::new(20, 5));
+
+        let snapshot = e.snapshot();
+        assert!(
+            snapshot.cursor.col < 20 && snapshot.cursor.row < 5,
+            "cursor left the grid: {:?}",
+            snapshot.cursor
+        );
+    }
+
     #[test]
     fn plain_text_lands_on_the_grid() {
         let mut e = emulator();

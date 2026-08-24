@@ -15,17 +15,18 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
     let session: TerminalSession
     private var displayLink: CADisplayLink?
     private var lastTitle: String?
+    private var lastReportedSize: TerminalSize
 
     init(cols: UInt16, rows: UInt16, fontSize: CGFloat) throws {
         let font = TerminalFont(size: fontSize)
-        session = try TerminalSession(size: TerminalSize(cols: cols, rows: rows))
+        let initialSize = TerminalSize(cols: cols, rows: rows)
+        session = try TerminalSession(size: initialSize)
         view = TerminalView(font: font, cols: Int(cols), rows: Int(rows))
+        lastReportedSize = initialSize
 
         window = NSWindow(
             contentRect: view.frame,
-            // Not resizable yet: reflow is Phase 5, and a window that resizes
-            // without reflowing would just be broken.
-            styleMask: [.titled, .closable, .miniaturizable],
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
@@ -37,6 +38,10 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
         super.init()
         window.delegate = self
         view.inputDelegate = self
+
+        // A window smaller than this cannot show anything useful, and letting
+        // it shrink further just produces degenerate grids.
+        window.contentMinSize = view.pixelSize(for: TerminalSize(cols: 20, rows: 5))
 
         // Report real cell metrics so the terminal can answer pixel-size
         // queries from full-screen programs.
@@ -85,6 +90,53 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
 
         if session.hasExited {
             stop()
+        }
+    }
+
+    // MARK: - Resizing
+
+    /// Snap the window to whole cells while it is being dragged.
+    ///
+    /// Without this the content view keeps a partial row or column that can
+    /// never be drawn into, which reads as an uneven margin along one edge.
+    func windowWillResize(_ sender: NSWindow, to frameSize: NSSize) -> NSSize {
+        let currentFrame = sender.frame
+        let currentContent = sender.contentRect(forFrameRect: currentFrame).size
+        let chrome = NSSize(
+            width: currentFrame.width - currentContent.width,
+            height: currentFrame.height - currentContent.height
+        )
+
+        let proposedContent = NSSize(
+            width: frameSize.width - chrome.width,
+            height: frameSize.height - chrome.height
+        )
+        let snapped = view.pixelSize(for: view.gridSize(fitting: proposedContent))
+
+        return NSSize(
+            width: snapped.width + chrome.width,
+            height: snapped.height + chrome.height
+        )
+    }
+
+    func windowDidResize(_ notification: Notification) {
+        resizeSessionToFitView()
+    }
+
+    /// Tell the core about a new grid size, but only when it actually changed.
+    ///
+    /// Resizing is a reflow of the whole scrollback and delivers SIGWINCH to
+    /// the child; doing that on every pixel of a drag would be wasteful and
+    /// would make programs redraw constantly.
+    private func resizeSessionToFitView() {
+        let grid = view.gridSize(fitting: view.bounds.size)
+        guard grid != lastReportedSize else { return }
+        lastReportedSize = grid
+
+        do {
+            try session.resize(to: grid)
+        } catch {
+            report(error)
         }
     }
 

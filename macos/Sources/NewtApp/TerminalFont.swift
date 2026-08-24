@@ -1,5 +1,6 @@
 import AppKit
 import CoreText
+import NewtKit
 
 /// The font and the cell geometry derived from it.
 ///
@@ -52,6 +53,11 @@ struct TerminalFont {
         cellWidth = advance.width.rounded(.up)
         cellHeight = (ascent + descent + leading).rounded(.up)
         baseline = descent.rounded(.up)
+    }
+
+    /// Pixel-to-cell conversions for this font.
+    var geometry: GridGeometry {
+        GridGeometry(cellWidth: cellWidth, cellHeight: cellHeight)
     }
 
     /// Font to use for a cell's attribute flags.

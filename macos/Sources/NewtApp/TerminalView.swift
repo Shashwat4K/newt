@@ -67,6 +67,17 @@ final class TerminalView: NSView {
     /// Current grid size, for translating mouse positions into cells.
     var gridSize: (cols: Int, rows: Int) { (buffer.cols, buffer.rows) }
 
+    /// Grid size that fits a given pixel size.
+    func gridSize(fitting size: NSSize) -> TerminalSize {
+        font.geometry.gridSize(fitting: size)
+    }
+
+    /// Pixel size that exactly holds a grid, for snapping the window so no
+    /// partial row or column is left over.
+    func pixelSize(for grid: TerminalSize) -> NSSize {
+        font.geometry.pixelSize(for: grid)
+    }
+
     /// Where the cursor is on screen, for positioning the IME candidate window.
     var cursorRectInView: NSRect {
         NSRect(

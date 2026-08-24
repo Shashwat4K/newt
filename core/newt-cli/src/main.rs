@@ -20,7 +20,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let (size, command, trace_enabled, quiet_period, keys) = parse_args(&args);
+    let (size, command, trace_enabled, quiet_period, keys, resize_to) = parse_args(&args);
 
     let config = SessionConfig {
         size,
@@ -68,12 +68,21 @@ fn main() {
         settle(&session, WaitFor::Quiet, quiet_period);
     }
 
+    if let Some(new_size) = resize_to {
+        if let Err(e) = session.resize(new_size) {
+            eprintln!("newt: {e}");
+            std::process::exit(1);
+        }
+        settle(&session, WaitFor::Quiet, quiet_period);
+    }
+
     let (text, cursor) = session.with_emulator(|e| (e.visible_string(), e.cursor()));
     println!("{text}");
+    let final_size = session.with_emulator(|e| e.size());
     eprintln!(
         "\n[{}x{} cursor {},{} exited={}]",
-        size.cols,
-        size.rows,
+        final_size.cols,
+        final_size.rows,
         cursor.0,
         cursor.1,
         session.has_exited()
@@ -155,13 +164,24 @@ fn escape(bytes: &[u8]) -> String {
     out
 }
 
-fn parse_args(args: &[String]) -> (SizeInCells, String, bool, Duration, Vec<String>) {
+#[allow(clippy::type_complexity)]
+fn parse_args(
+    args: &[String],
+) -> (
+    SizeInCells,
+    String,
+    bool,
+    Duration,
+    Vec<String>,
+    Option<SizeInCells>,
+) {
     let mut cols = 80u16;
     let mut rows = 24u16;
     let mut trace = false;
     let mut quiet_period_ms = DEFAULT_QUIET_PERIOD_MS;
     let mut command = String::from("echo newt is alive");
     let mut keys: Vec<String> = Vec::new();
+    let mut resize_to: Option<SizeInCells> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -185,10 +205,25 @@ fn parse_args(args: &[String]) -> (SizeInCells, String, bool, Duration, Vec<Stri
                 trace = true;
                 i += 1;
             }
-            // Everything after --keys is typed, one step per argument.
+            // Resize after the typed steps, to exercise SIGWINCH and reflow.
+            "--resize" => {
+                let cols = args.get(i + 1).and_then(|v| v.parse().ok());
+                let rows = args.get(i + 2).and_then(|v| v.parse().ok());
+                if let (Some(cols), Some(rows)) = (cols, rows) {
+                    resize_to = Some(SizeInCells::new(cols, rows));
+                }
+                i += 3;
+            }
+            // Steps after --keys are typed, one per argument, stopping at the
+            // next flag. Stopping matters: consuming the rest unconditionally
+            // silently types later flags into the program under test.
             "--keys" => {
-                keys = args[(i + 1)..].to_vec();
-                i = args.len();
+                let mut end = i + 1;
+                while end < args.len() && !args[end].starts_with("--") {
+                    end += 1;
+                }
+                keys = args[(i + 1)..end].to_vec();
+                i = end;
             }
             other => {
                 command = other.to_string();
@@ -203,5 +238,6 @@ fn parse_args(args: &[String]) -> (SizeInCells, String, bool, Duration, Vec<Stri
         trace,
         Duration::from_millis(quiet_period_ms),
         keys,
+        resize_to,
     )
 }
