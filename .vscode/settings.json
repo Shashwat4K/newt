@@ -1,0 +1,8 @@
+{
+  // The Cargo workspace lives in core/, not at the repository root, so
+  // rust-analyzer is pointed at it explicitly rather than left to discover it.
+  "rust-analyzer.linkedProjects": ["core/Cargo.toml"],
+
+  // Terminal work is full of escape bytes and trailing spaces that matter.
+  "files.trimTrailingWhitespace": false
+}
