@@ -13,6 +13,7 @@ enum OfflineRender {
     static func run(
         command: String?,
         typed: [String] = [],
+        find: String? = nil,
         outputPath: String,
         cols: UInt16,
         rows: UInt16,
@@ -46,6 +47,13 @@ enum OfflineRender {
                 .prefix(2)
                 .joined(separator: " | ") ?? ""
             FileHandle.standardError.write(Data("  -> \(preview)\n".utf8))
+        }
+
+        // Searching selects the match, which is what draws the highlight —
+        // so this also exercises selection rendering.
+        if let find {
+            let found = try session.find(find)
+            FileHandle.standardError.write(Data("find \(find): \(found)\n".utf8))
         }
 
         let view = TerminalView(font: font, cols: Int(cols), rows: Int(rows))

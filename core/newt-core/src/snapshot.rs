@@ -31,6 +31,11 @@ pub mod flags {
     pub const WIDE_SPACER: u16 = 1 << 11;
     /// This row continues into the next without a newline.
     pub const WRAPLINE: u16 = 1 << 12;
+    /// Part of the current selection or search match.
+    ///
+    /// Marked per cell rather than shipped as a range, so the renderer never
+    /// has to reason about wrapped lines or block selections.
+    pub const SELECTED: u16 = 1 << 13;
 }
 
 /// Cursor shapes, matching the engine's set.

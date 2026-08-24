@@ -20,6 +20,16 @@ protocol TerminalInputDelegate: AnyObject {
     ) -> Bool
     func terminalView(_ view: TerminalView, scrollByLines lines: Int32)
     func terminalView(_ view: TerminalView, paste text: String)
+    func terminalView(
+        _ view: TerminalView,
+        startSelection col: UInt16,
+        row: UInt16,
+        sideRight: Bool,
+        mode: SelectionMode
+    )
+    func terminalView(_ view: TerminalView, updateSelection col: UInt16, row: UInt16, sideRight: Bool)
+    func terminalViewSelectedText(_ view: TerminalView) -> String?
+    func terminalViewScrollToBottom(_ view: TerminalView)
 }
 
 extension TerminalView {
@@ -37,6 +47,30 @@ extension TerminalView {
         }
 
         let modifiers = Self.modifiers(from: event)
+
+        // Scrollback bindings are handled here rather than sent to the child.
+        // These chords are ours: no program expects Shift-PageUp, and a
+        // terminal you cannot scroll with the keyboard is a poor one.
+        if modifiers.contains(.shift), let key = Self.specialKey(for: event) {
+            let page = Int32(max(1, gridSize.rows - 1))
+            switch key {
+            case .pageUp:
+                inputDelegate?.terminalView(self, scrollByLines: page)
+                return
+            case .pageDown:
+                inputDelegate?.terminalView(self, scrollByLines: -page)
+                return
+            case .home:
+                // Far enough to reach the top of any scrollback we keep.
+                inputDelegate?.terminalView(self, scrollByLines: Int32.max / 2)
+                return
+            case .end:
+                inputDelegate?.terminalViewScrollToBottom(self)
+                return
+            default:
+                break
+            }
+        }
 
         if let key = Self.specialKey(for: event) {
             inputDelegate?.terminalView(self, send: key, modifiers: modifiers)
@@ -111,7 +145,7 @@ extension TerminalView {
         }
     }
 
-    // MARK: - Paste
+    // MARK: - Copy and paste
 
     /// Standard Edit ▸ Paste. Reaches here through the responder chain.
     @objc func paste(_ sender: Any?) {
@@ -119,29 +153,81 @@ extension TerminalView {
         inputDelegate?.terminalView(self, paste: text)
     }
 
+    /// Standard Edit ▸ Copy.
+    @objc func copy(_ sender: Any?) {
+        guard let text = inputDelegate?.terminalViewSelectedText(self), !text.isEmpty else {
+            return
+        }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+    }
+
+    /// Grey out Copy when there is nothing selected.
+    ///
+    /// Declared through NSMenuItemValidation rather than as an override: NSView
+    /// does not declare this method.
+    @objc func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(copy(_:)) {
+            return inputDelegate?.terminalViewSelectedText(self)?.isEmpty == false
+        }
+        return true
+    }
+
     // MARK: - Mouse
 
-    override func mouseDown(with event: NSEvent) { sendMouse(.press, button: .left, event: event) }
-    override func mouseUp(with event: NSEvent) { sendMouse(.release, button: .left, event: event) }
+    override func mouseDown(with event: NSEvent) {
+        // A program that asked for mouse reporting gets the event; only when
+        // nothing wants it does the click mean "select text".
+        if sendMouse(.press, button: .left, event: event) { return }
+
+        let (col, row) = cell(for: event)
+        let mode: SelectionMode
+        switch event.clickCount {
+        case 2: mode = .word
+        case 3: mode = .line
+        default: mode = event.modifierFlags.contains(.option) ? .block : .simple
+        }
+
+        inputDelegate?.terminalView(
+            self,
+            startSelection: col,
+            row: row,
+            sideRight: isRightHalf(of: event),
+            mode: mode
+        )
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        _ = sendMouse(.release, button: .left, event: event)
+    }
+
     override func mouseDragged(with event: NSEvent) {
-        sendMouse(.motion, button: .left, event: event)
+        if sendMouse(.motion, button: .left, event: event) { return }
+
+        let (col, row) = cell(for: event)
+        inputDelegate?.terminalView(
+            self,
+            updateSelection: col,
+            row: row,
+            sideRight: isRightHalf(of: event)
+        )
     }
 
     override func rightMouseDown(with event: NSEvent) {
-        sendMouse(.press, button: .right, event: event)
+        _ = sendMouse(.press, button: .right, event: event)
     }
     override func rightMouseUp(with event: NSEvent) {
-        sendMouse(.release, button: .right, event: event)
+        _ = sendMouse(.release, button: .right, event: event)
     }
     override func rightMouseDragged(with event: NSEvent) {
-        sendMouse(.motion, button: .right, event: event)
+        _ = sendMouse(.motion, button: .right, event: event)
     }
 
     override func otherMouseDown(with event: NSEvent) {
-        sendMouse(.press, button: .middle, event: event)
+        _ = sendMouse(.press, button: .middle, event: event)
     }
     override func otherMouseUp(with event: NSEvent) {
-        sendMouse(.release, button: .middle, event: event)
+        _ = sendMouse(.release, button: .middle, event: event)
     }
 
     override func scrollWheel(with event: NSEvent) {
@@ -171,16 +257,25 @@ extension TerminalView {
         }
     }
 
-    private func sendMouse(_ kind: MouseEventKind, button: MouseButton, event: NSEvent) {
+    /// - Returns: whether the program consumed the event.
+    @discardableResult
+    private func sendMouse(_ kind: MouseEventKind, button: MouseButton, event: NSEvent) -> Bool {
         let (col, row) = cell(for: event)
-        inputDelegate?.terminalView(
+        return inputDelegate?.terminalView(
             self,
             sendMouse: kind,
             button: button,
             col: col,
             row: row,
             modifiers: Self.modifiers(from: event)
-        )
+        ) ?? false
+    }
+
+    /// Whether the pointer is in the right half of its cell, which decides
+    /// whether that cell is included in a selection.
+    private func isRightHalf(of event: NSEvent) -> Bool {
+        let point = convert(event.locationInWindow, from: nil)
+        return point.x.truncatingRemainder(dividingBy: font.cellWidth) > font.cellWidth / 2
     }
 
     /// Cell under the pointer, clamped to the grid so a drag past the edge

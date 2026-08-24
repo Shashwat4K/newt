@@ -25,15 +25,23 @@ if let flag = arguments.firstIndex(of: "--render-to"), flag + 1 < arguments.coun
     // A step of the form <name> is a named key, e.g. <enter> or <escape>.
     let typed: [String]
     if let typeFlag = arguments.firstIndex(of: "--type") {
-        typed = Array(arguments[(typeFlag + 1)...])
+        var end = typeFlag + 1
+        while end < arguments.count, !arguments[end].hasPrefix("--") { end += 1 }
+        typed = Array(arguments[(typeFlag + 1)..<end])
     } else {
         typed = []
+    }
+
+    var find: String?
+    if let findFlag = arguments.firstIndex(of: "--find"), findFlag + 1 < arguments.count {
+        find = arguments[findFlag + 1]
     }
     application.setActivationPolicy(.prohibited)
     do {
         try OfflineRender.run(
             command: command,
             typed: typed,
+            find: find,
             outputPath: path,
             cols: 100,
             rows: 30,

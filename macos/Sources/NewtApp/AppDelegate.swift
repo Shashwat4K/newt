@@ -43,9 +43,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // is what lets the core wrap it in bracketed-paste markers.
         let editMenu = NSMenu(title: "Edit")
         editMenu.addItem(
+            withTitle: "Copy",
+            action: #selector(NSText.copy(_:)),
+            keyEquivalent: "c"
+        )
+        editMenu.addItem(
             withTitle: "Paste",
             action: #selector(NSText.paste(_:)),
             keyEquivalent: "v"
+        )
+        editMenu.addItem(NSMenuItem.separator())
+        editMenu.addItem(
+            withTitle: "Find…",
+            action: #selector(TerminalWindowController.showFindBar(_:)),
+            keyEquivalent: "f"
+        )
+        editMenu.addItem(
+            withTitle: "Find Next",
+            action: #selector(TerminalWindowController.findNext(_:)),
+            keyEquivalent: "g"
+        )
+        editMenu.addItem(
+            withTitle: "Find Previous",
+            action: #selector(TerminalWindowController.findPrevious(_:)),
+            keyEquivalent: "G"
         )
         let editMenuItem = NSMenuItem()
         editMenuItem.title = "Edit"

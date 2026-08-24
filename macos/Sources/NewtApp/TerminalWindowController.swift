@@ -16,6 +16,7 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
     private var displayLink: CADisplayLink?
     private var lastTitle: String?
     private var lastReportedSize: TerminalSize
+    private let findBar = FindBar()
 
     init(cols: UInt16, rows: UInt16, fontSize: CGFloat) throws {
         let font = TerminalFont(size: fontSize)
@@ -31,13 +32,41 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
             defer: false
         )
         window.title = "newt"
-        window.contentView = view
+
+        // The terminal fills the window; the find bar floats over its top-right
+        // corner so opening it does not change the grid size.
+        let container = NSView(frame: view.frame)
+        view.autoresizingMask = [.width, .height]
+        container.addSubview(view)
+
+        findBar.isHidden = true
+        findBar.autoresizingMask = [.minXMargin, .minYMargin]
+        findBar.setFrameOrigin(
+            NSPoint(x: view.frame.maxX - findBar.frame.width - 12, y: view.frame.maxY - findBar.frame.height - 12)
+        )
+        container.addSubview(findBar)
+
+        window.contentView = container
         window.center()
         window.isReleasedWhenClosed = false
 
         super.init()
         window.delegate = self
         view.inputDelegate = self
+
+        findBar.onFind = { [weak self] query, forward in
+            guard let self else { return false }
+            do {
+                return try self.session.find(query, forward: forward)
+            } catch {
+                self.report(error)
+                return false
+            }
+        }
+        findBar.onClose = { [weak self] in
+            guard let self else { return }
+            self.window.makeFirstResponder(self.view)
+        }
 
         // A window smaller than this cannot show anything useful, and letting
         // it shrink further just produces degenerate grids.
@@ -91,6 +120,20 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
         if session.hasExited {
             stop()
         }
+    }
+
+    // MARK: - Find
+
+    @objc func showFindBar(_ sender: Any?) {
+        findBar.focus()
+    }
+
+    @objc func findNext(_ sender: Any?) {
+        findBar.repeatSearch(forward: true)
+    }
+
+    @objc func findPrevious(_ sender: Any?) {
+        findBar.repeatSearch(forward: false)
     }
 
     // MARK: - Resizing
@@ -193,5 +236,40 @@ extension TerminalWindowController: TerminalInputDelegate {
 
     func terminalView(_ view: TerminalView, paste text: String) {
         do { try session.paste(text) } catch { report(error) }
+    }
+
+    func terminalView(
+        _ view: TerminalView,
+        startSelection col: UInt16,
+        row: UInt16,
+        sideRight: Bool,
+        mode: SelectionMode
+    ) {
+        do {
+            try session.startSelection(col: col, row: row, sideRight: sideRight, mode: mode)
+        } catch {
+            report(error)
+        }
+    }
+
+    func terminalView(
+        _ view: TerminalView,
+        updateSelection col: UInt16,
+        row: UInt16,
+        sideRight: Bool
+    ) {
+        do {
+            try session.updateSelection(col: col, row: row, sideRight: sideRight)
+        } catch {
+            report(error)
+        }
+    }
+
+    func terminalViewSelectedText(_ view: TerminalView) -> String? {
+        session.selectedText
+    }
+
+    func terminalViewScrollToBottom(_ view: TerminalView) {
+        session.scrollToBottom()
     }
 }

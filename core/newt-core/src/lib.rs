@@ -22,7 +22,7 @@ pub mod palette;
 pub mod session;
 pub mod snapshot;
 
-pub use emulator::{Emulator, SizeInCells, DEFAULT_SCROLLBACK_LINES};
+pub use emulator::{Emulator, SelectionMode, SizeInCells, DEFAULT_SCROLLBACK_LINES};
 pub use error::{Error, Result};
 pub use events::EventSink;
 pub use input::{InputModes, Key, KeyEvent, MouseEvent, MouseKind};

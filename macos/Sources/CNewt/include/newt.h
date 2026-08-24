@@ -36,6 +36,9 @@
 
 #define NEWT_FLAG_WRAPLINE (1 << 12)
 
+// Part of the current selection or search match.
+#define NEWT_FLAG_SELECTED (1 << 13)
+
 #define NEWT_CURSOR_BLOCK 0
 
 #define NEWT_CURSOR_UNDERLINE 1
@@ -98,6 +101,16 @@
 
 // Button value meaning "no button held", for motion events.
 #define NEWT_MOUSE_NO_BUTTON 255
+
+#define NEWT_SELECTION_SIMPLE 0
+
+#define NEWT_SELECTION_BLOCK 1
+
+// Whole words, as a double-click gives.
+#define NEWT_SELECTION_WORD 2
+
+// Whole lines, as a triple-click gives.
+#define NEWT_SELECTION_LINE 3
 
 // A running terminal session. Opaque to C.
 typedef struct NewtSession NewtSession;
@@ -301,6 +314,68 @@ bool newt_session_send_mouse(NewtSession *handle,
 //
 // `handle` must be live, and `text` must point to `len` bytes of UTF-8.
 bool newt_session_send_paste(NewtSession *handle, const uint8_t *text, uintptr_t len);
+
+// Begin a selection at a viewport cell.
+//
+// `side_right` says which half of the cell the pointer is in, which decides
+// whether that cell is included.
+//
+// # Safety
+//
+// `handle` must be live.
+bool newt_session_selection_start(NewtSession *handle,
+                                  uint16_t col,
+                                  uint16_t row,
+                                  bool side_right,
+                                  uint8_t mode);
+
+// Extend the active selection to a viewport cell.
+//
+// # Safety
+//
+// `handle` must be live.
+bool newt_session_selection_update(NewtSession *handle,
+                                   uint16_t col,
+                                   uint16_t row,
+                                   bool side_right);
+
+// Clear any selection.
+//
+// # Safety
+//
+// `handle` must be live.
+bool newt_session_selection_clear(NewtSession *handle);
+
+// The selected text, or null when nothing is selected.
+//
+// Valid until the next call to this function on the same session.
+//
+// # Safety
+//
+// `handle` must be live.
+const char *newt_session_selected_text(NewtSession *handle);
+
+// Find `pattern`, selecting and scrolling to the match.
+//
+// The search is literal, not a regular expression. `found` receives whether a
+// match was located.
+//
+// # Safety
+//
+// `handle` must be live, `pattern` must point to `len` bytes of UTF-8, and
+// `found` may be null.
+bool newt_session_find(NewtSession *handle,
+                       const uint8_t *pattern,
+                       uintptr_t len,
+                       bool forward,
+                       bool *found);
+
+// Jump the viewport back to the live edge.
+//
+// # Safety
+//
+// `handle` must be live.
+bool newt_session_scroll_to_bottom(NewtSession *handle);
 
 #ifdef __cplusplus
 }  // extern "C"

@@ -27,7 +27,9 @@ use std::path::PathBuf;
 
 use newt_core::input::{self, Key, KeyEvent, MouseEvent, MouseKind};
 use newt_core::snapshot::{cursor_shape, flags, Cell, Cursor, DamagedRow};
-use newt_core::{Session as CoreSession, SessionConfig, SizeInCells, Snapshot as CoreSnapshot};
+use newt_core::{
+    SelectionMode, Session as CoreSession, SessionConfig, SizeInCells, Snapshot as CoreSnapshot,
+};
 
 // Cell attribute bits and cursor shapes, restated as literals so `cbindgen`
 // can emit them into the header — it cannot evaluate cross-crate paths. The
@@ -46,6 +48,8 @@ pub const NEWT_FLAG_HIDDEN: u16 = 1 << 9;
 pub const NEWT_FLAG_WIDE: u16 = 1 << 10;
 pub const NEWT_FLAG_WIDE_SPACER: u16 = 1 << 11;
 pub const NEWT_FLAG_WRAPLINE: u16 = 1 << 12;
+/// Part of the current selection or search match.
+pub const NEWT_FLAG_SELECTED: u16 = 1 << 13;
 
 pub const NEWT_CURSOR_BLOCK: u8 = 0;
 pub const NEWT_CURSOR_UNDERLINE: u8 = 1;
@@ -90,6 +94,14 @@ pub const NEWT_MOUSE_SCROLL_DOWN: u8 = 4;
 /// Button value meaning "no button held", for motion events.
 pub const NEWT_MOUSE_NO_BUTTON: u8 = 255;
 
+// How a selection expands as it is dragged.
+pub const NEWT_SELECTION_SIMPLE: u8 = 0;
+pub const NEWT_SELECTION_BLOCK: u8 = 1;
+/// Whole words, as a double-click gives.
+pub const NEWT_SELECTION_WORD: u8 = 2;
+/// Whole lines, as a triple-click gives.
+pub const NEWT_SELECTION_LINE: u8 = 3;
+
 const _: () = {
     assert!(NEWT_FLAG_BOLD == flags::BOLD);
     assert!(NEWT_FLAG_ITALIC == flags::ITALIC);
@@ -104,6 +116,7 @@ const _: () = {
     assert!(NEWT_FLAG_WIDE == flags::WIDE);
     assert!(NEWT_FLAG_WIDE_SPACER == flags::WIDE_SPACER);
     assert!(NEWT_FLAG_WRAPLINE == flags::WRAPLINE);
+    assert!(NEWT_FLAG_SELECTED == flags::SELECTED);
 
     assert!(NEWT_CURSOR_BLOCK == cursor_shape::BLOCK);
     assert!(NEWT_CURSOR_UNDERLINE == cursor_shape::UNDERLINE);
@@ -142,6 +155,16 @@ fn decode_key(value: u32) -> Option<Key> {
     }
 }
 
+fn decode_selection_mode(value: u8) -> Option<SelectionMode> {
+    match value {
+        NEWT_SELECTION_SIMPLE => Some(SelectionMode::Simple),
+        NEWT_SELECTION_BLOCK => Some(SelectionMode::Block),
+        NEWT_SELECTION_WORD => Some(SelectionMode::Word),
+        NEWT_SELECTION_LINE => Some(SelectionMode::Line),
+        _ => None,
+    }
+}
+
 fn decode_mouse_kind(value: u8) -> Option<MouseKind> {
     match value {
         NEWT_MOUSE_PRESS => Some(MouseKind::Press),
@@ -175,6 +198,8 @@ pub struct NewtSession {
     snapshot: CoreSnapshot,
     /// Keeps the last returned title alive for the caller to read.
     title: Option<CString>,
+    /// Likewise for selected text.
+    selection: Option<CString>,
 }
 
 /// Borrowed view of one frame. See the module docs for lifetimes.
@@ -272,6 +297,7 @@ pub unsafe extern "C" fn newt_session_new(
                 session,
                 snapshot: CoreSnapshot::default(),
                 title: None,
+                selection: None,
             })),
             Err(e) => {
                 set_last_error(e.to_string());
@@ -593,6 +619,132 @@ pub unsafe extern "C" fn newt_session_send_paste(
             set_last_error(message);
             false
         }
+    })
+}
+
+/// Begin a selection at a viewport cell.
+///
+/// `side_right` says which half of the cell the pointer is in, which decides
+/// whether that cell is included.
+///
+/// # Safety
+///
+/// `handle` must be live.
+#[no_mangle]
+pub unsafe extern "C" fn newt_session_selection_start(
+    handle: *mut NewtSession,
+    col: u16,
+    row: u16,
+    side_right: bool,
+    mode: u8,
+) -> bool {
+    with_session(handle, |session| {
+        let Some(mode) = decode_selection_mode(mode) else {
+            set_last_error("unknown selection mode");
+            return false;
+        };
+        session.session.start_selection(col, row, side_right, mode);
+        true
+    })
+}
+
+/// Extend the active selection to a viewport cell.
+///
+/// # Safety
+///
+/// `handle` must be live.
+#[no_mangle]
+pub unsafe extern "C" fn newt_session_selection_update(
+    handle: *mut NewtSession,
+    col: u16,
+    row: u16,
+    side_right: bool,
+) -> bool {
+    with_session(handle, |session| {
+        session.session.update_selection(col, row, side_right);
+        true
+    })
+}
+
+/// Clear any selection.
+///
+/// # Safety
+///
+/// `handle` must be live.
+#[no_mangle]
+pub unsafe extern "C" fn newt_session_selection_clear(handle: *mut NewtSession) -> bool {
+    with_session(handle, |session| {
+        session.session.clear_selection();
+        true
+    })
+}
+
+/// The selected text, or null when nothing is selected.
+///
+/// Valid until the next call to this function on the same session.
+///
+/// # Safety
+///
+/// `handle` must be live.
+#[no_mangle]
+pub unsafe extern "C" fn newt_session_selected_text(handle: *mut NewtSession) -> *const c_char {
+    if handle.is_null() {
+        set_last_error("null session handle");
+        return std::ptr::null();
+    }
+
+    let session = &mut *handle;
+    let text = session.session.selected_text();
+
+    session.selection = text.and_then(|text| CString::new(text).ok());
+    match session.selection.as_ref() {
+        Some(text) => text.as_ptr(),
+        None => std::ptr::null(),
+    }
+}
+
+/// Find `pattern`, selecting and scrolling to the match.
+///
+/// The search is literal, not a regular expression. `found` receives whether a
+/// match was located.
+///
+/// # Safety
+///
+/// `handle` must be live, `pattern` must point to `len` bytes of UTF-8, and
+/// `found` may be null.
+#[no_mangle]
+pub unsafe extern "C" fn newt_session_find(
+    handle: *mut NewtSession,
+    pattern: *const u8,
+    len: usize,
+    forward: bool,
+    found: *mut bool,
+) -> bool {
+    with_session(handle, |session| match borrow_str(pattern, len) {
+        Ok(pattern) => {
+            let matched = session.session.find(pattern, forward);
+            if !found.is_null() {
+                found.write(matched);
+            }
+            true
+        }
+        Err(message) => {
+            set_last_error(message);
+            false
+        }
+    })
+}
+
+/// Jump the viewport back to the live edge.
+///
+/// # Safety
+///
+/// `handle` must be live.
+#[no_mangle]
+pub unsafe extern "C" fn newt_session_scroll_to_bottom(handle: *mut NewtSession) -> bool {
+    with_session(handle, |session| {
+        session.session.scroll_to_bottom();
+        true
     })
 }
 

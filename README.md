@@ -10,7 +10,7 @@ It is built so Linux and Windows ports are later work rather than rewrites: ever
 
 ## Status
 
-`newt` is now usable: it opens a resizable window running your login shell, and you can type into it. Not a daily driver yet — there is no selection, copy, or find (Phase 6), and no tabs or splits (Phase 7).
+`newt` is close to daily-driver usable: a resizable window running your login shell, with typing, scrollback, selection, copy and paste, and find. Still missing tabs and splits (Phase 7) and an installable `.app` (Phase 8).
 
 | Phase | | |
 |---|---|---|
@@ -20,8 +20,8 @@ It is built so Linux and Windows ports are later work rather than rewrites: ever
 | 3 | Window and CoreText renderer | done |
 | 4 | Input encoding | done |
 | 5 | Resize and reflow | done |
-| 6 | Scrollback, selection, find | next |
-| 7 | Tabs, splits, windows | |
+| 6 | Scrollback, selection, find | done |
+| 7 | Tabs, splits, windows | next |
 | 8 | `.app` bundling | |
 
 Verified against zsh with oh-my-zsh and powerlevel10k, vim, htop, less, and tmux — including editing in vim and paging in less entirely from the keyboard, and vim and tmux redrawing correctly after a resize.
@@ -58,6 +58,16 @@ Cargo must run before SwiftPM — the Swift target links the core's static libra
 ```
 
 Typing, Control and Option chords, arrow and function keys, mouse reporting, and paste (⌘V, bracketed when the program asks for it) all work. Dead keys and IME composition go through `NSTextInputClient`; in-progress composition is not drawn in the grid yet.
+
+| | |
+|---|---|
+| Select | drag; double-click for a word, triple-click for a line, ⌥-drag for a block |
+| Copy | ⌘C |
+| Paste | ⌘V |
+| Find | ⌘F, then Return / ⇧Return; ⌘G and ⇧⌘G repeat |
+| Scroll | wheel, ⇧PageUp / ⇧PageDown, ⇧Home / ⇧End |
+
+Search is literal, not a regular expression — someone looking for `a.out` means those characters. A match is selected and scrolled into view, so search reuses the selection highlight rather than inventing a second one.
 
 Draw one frame to a PNG without opening a window — useful for checking the renderer unattended, and the fastest way to see what a frame actually looks like:
 

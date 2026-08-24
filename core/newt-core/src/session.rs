@@ -12,7 +12,7 @@ use std::thread::{self, JoinHandle};
 
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 
-use crate::emulator::{Emulator, SizeInCells, DEFAULT_SCROLLBACK_LINES};
+use crate::emulator::{Emulator, SelectionMode, SizeInCells, DEFAULT_SCROLLBACK_LINES};
 use crate::error::{Error, Result};
 use crate::input::{encode_key, encode_mouse, encode_paste, encode_text, KeyEvent, MouseEvent};
 
@@ -207,6 +207,34 @@ impl Session {
             encode_paste(text, emulator.modes())
         });
         self.write(&bytes)
+    }
+
+    // --- selection and search ---
+
+    pub fn start_selection(&self, col: u16, row: u16, side_right: bool, mode: SelectionMode) {
+        self.with_emulator(|e| e.start_selection(col, row, side_right, mode));
+    }
+
+    pub fn update_selection(&self, col: u16, row: u16, side_right: bool) {
+        self.with_emulator(|e| e.update_selection(col, row, side_right));
+    }
+
+    pub fn clear_selection(&self) {
+        self.with_emulator(|e| e.clear_selection());
+    }
+
+    pub fn selected_text(&self) -> Option<String> {
+        self.with_emulator(|e| e.selected_text())
+    }
+
+    /// Find `pattern`, selecting and scrolling to the match.
+    pub fn find(&self, pattern: &str, forward: bool) -> bool {
+        self.with_emulator(|e| e.find(pattern, forward))
+    }
+
+    /// Jump the viewport back to the live edge.
+    pub fn scroll_to_bottom(&self) {
+        self.with_emulator(|e| e.scroll_to_bottom());
     }
 
     /// Resize both the emulator and the PTY.

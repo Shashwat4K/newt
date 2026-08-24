@@ -31,6 +31,10 @@ final class TerminalView: NSView {
     /// window matches the terminal rather than guessing a color.
     private var backgroundColor = CGColor(gray: 0.08, alpha: 1)
 
+    /// Background for selected cells. A fixed color for now — theming is
+    /// deliberately out of MVP scope.
+    private let selectionColor = CGColor(srgbRed: 0.22, green: 0.31, blue: 0.51, alpha: 1)
+
     init(font: TerminalFont, cols: Int, rows: Int) {
         self.font = font
         super.init(
@@ -114,11 +118,11 @@ final class TerminalView: NSView {
     /// full-width bar is one fill rather than one per cell.
     private func drawBackgrounds(row: Int, in context: CGContext) {
         var runStart = 0
-        var runColor: NewtColor?
+        var runColor: CGColor?
 
         func flush(end: Int) {
             guard let color = runColor, end > runStart else { return }
-            context.setFillColor(cgColor(color))
+            context.setFillColor(color)
             context.fill(
                 NSRect(
                     x: CGFloat(runStart) * font.cellWidth,
@@ -131,10 +135,11 @@ final class TerminalView: NSView {
 
         for col in 0..<buffer.cols {
             guard let cell = buffer.cell(col: col, row: row) else { continue }
-            if let current = runColor, sameColor(current, cell.bg) { continue }
+            let background = self.background(of: cell)
+            if let current = runColor, current == background { continue }
             flush(end: col)
             runStart = col
-            runColor = cell.bg
+            runColor = background
         }
         flush(end: buffer.cols)
     }
@@ -309,6 +314,18 @@ final class TerminalView: NSView {
         return lower < upper ? lower..<upper : 0..<0
     }
 
+    /// A cell's background, accounting for selection.
+    ///
+    /// Selection is drawn as a background swap rather than by inverting: the
+    /// core has already applied inverse video, and inverting again would make
+    /// selected inverse text invisible.
+    private func background(of cell: NewtCell) -> CGColor {
+        if cell.flags & UInt16(NEWT_FLAG_SELECTED) != 0 {
+            return selectionColor
+        }
+        return cgColor(cell.bg)
+    }
+
     private func cgColor(_ color: NewtColor) -> CGColor {
         CGColor(
             srgbRed: CGFloat(color.r) / 255,
@@ -316,9 +333,5 @@ final class TerminalView: NSView {
             blue: CGFloat(color.b) / 255,
             alpha: 1
         )
-    }
-
-    private func sameColor(_ lhs: NewtColor, _ rhs: NewtColor) -> Bool {
-        lhs.r == rhs.r && lhs.g == rhs.g && lhs.b == rhs.b
     }
 }

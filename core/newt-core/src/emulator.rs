@@ -7,9 +7,11 @@
 //! replaceable: nothing outside this module names its types.
 
 use alacritty_terminal::grid::Dimensions;
-use alacritty_terminal::index::{Column, Line};
+use alacritty_terminal::index::{Boundary, Column, Direction, Line, Point, Side};
+use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::color::Colors;
+use alacritty_terminal::term::search::RegexSearch;
 use alacritty_terminal::term::{Config, Term, TermDamage, TermMode};
 use alacritty_terminal::vte::ansi::{Color as EngineColor, CursorShape, Processor};
 
@@ -175,6 +177,7 @@ impl Emulator {
         let content = self.term.renderable_content();
         let display_offset = content.display_offset as i32;
         let colors = content.colors;
+        let selection = content.selection;
 
         for indexed in content.display_iter {
             let row = indexed.point.line.0 + display_offset;
@@ -186,6 +189,12 @@ impl Emulator {
             let cell = indexed.cell;
             let index = row as usize * cols as usize + col;
             out.cells[index] = convert_cell(cell, colors, &mut out.combining);
+
+            if let Some(range) = selection {
+                if range.contains(indexed.point) {
+                    out.cells[index].flags |= flags::SELECTED;
+                }
+            }
         }
 
         let cursor_row = content.cursor.point.line.0 + display_offset;
@@ -209,6 +218,132 @@ impl Emulator {
         let mut out = Snapshot::default();
         self.snapshot_into(&mut out);
         out
+    }
+
+    // --- selection ---
+
+    /// Begin a selection at a viewport cell.
+    pub fn start_selection(&mut self, col: u16, row: u16, side_right: bool, mode: SelectionMode) {
+        let point = self.viewport_point(col, row);
+        let side = if side_right { Side::Right } else { Side::Left };
+        self.term.selection = Some(Selection::new(mode.into(), point, side));
+    }
+
+    /// Extend the active selection to a viewport cell.
+    pub fn update_selection(&mut self, col: u16, row: u16, side_right: bool) {
+        let point = self.viewport_point(col, row);
+        let side = if side_right { Side::Right } else { Side::Left };
+        if let Some(selection) = self.term.selection.as_mut() {
+            selection.update(point, side);
+        }
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.term.selection = None;
+    }
+
+    /// Start of the current selection in viewport coordinates, for tests and
+    /// for the shell to know where a search landed.
+    pub fn selection_start(&self) -> Option<(u16, u16)> {
+        let range = self
+            .term
+            .selection
+            .as_ref()
+            .and_then(|selection| selection.to_range(&self.term))?;
+        let display_offset = self.term.grid().display_offset() as i32;
+        let row = range.start.line.0 + display_offset;
+        if row < 0 {
+            return None;
+        }
+        Some((range.start.column.0 as u16, row as u16))
+    }
+
+    pub fn has_selection(&self) -> bool {
+        self.term
+            .selection
+            .as_ref()
+            .is_some_and(|selection| !selection.is_empty())
+    }
+
+    /// The selected text, or `None` when nothing is selected.
+    pub fn selected_text(&self) -> Option<String> {
+        self.term
+            .selection_to_string()
+            .filter(|text| !text.is_empty())
+    }
+
+    // --- search ---
+
+    /// Find `pattern` and select the match, scrolling it into view.
+    ///
+    /// Searching is literal, not regular-expression: someone looking for
+    /// `a.out` means those characters, and silently treating input as a regex
+    /// turns a search into a puzzle.
+    pub fn find(&mut self, pattern: &str, forward: bool) -> bool {
+        if pattern.is_empty() {
+            return false;
+        }
+
+        let Ok(mut regex) = RegexSearch::new(&escape_literal(pattern)) else {
+            return false;
+        };
+
+        let direction = if forward {
+            Direction::Right
+        } else {
+            Direction::Left
+        };
+        let origin = self.search_origin(forward);
+
+        let Some(found) = self
+            .term
+            .search_next(&mut regex, origin, direction, Side::Left, None)
+        else {
+            return false;
+        };
+
+        // Selecting the match is what highlights it: selection is already
+        // drawn, so search does not need a second highlighting mechanism.
+        let mut selection = Selection::new(SelectionType::Simple, *found.start(), Side::Left);
+        selection.update(*found.end(), Side::Right);
+        self.term.selection = Some(selection);
+
+        self.term.scroll_to_point(*found.start());
+        true
+    }
+
+    /// Where the next search starts: just past the current match, so repeated
+    /// searches advance instead of finding the same text forever.
+    fn search_origin(&self, forward: bool) -> Point {
+        let range = self
+            .term
+            .selection
+            .as_ref()
+            .and_then(|selection| selection.to_range(&self.term));
+
+        match range {
+            // Step past the end of the previous match. Starting at its own
+            // start would find it again and the search would never advance.
+            Some(range) if forward => range.end.add(self.term.grid(), Boundary::Grid, 1),
+            Some(range) => range.start.sub(self.term.grid(), Boundary::Grid, 1),
+            None if forward => {
+                Point::new(Line(-(self.term.grid().display_offset() as i32)), Column(0))
+            }
+            None => Point::new(
+                Line(self.term.screen_lines() as i32 - 1),
+                Column(self.term.columns() - 1),
+            ),
+        }
+    }
+
+    /// Translate viewport coordinates into grid coordinates, which are what the
+    /// engine works in and which shift as the viewport scrolls.
+    fn viewport_point(&self, col: u16, row: u16) -> Point {
+        let display_offset = self.term.grid().display_offset() as i32;
+        Point::new(
+            Line(row as i32 - display_offset),
+            Column((col as usize).min(self.term.columns().saturating_sub(1))),
+        )
     }
 
     /// Terminal modes that affect how input is encoded.
@@ -246,6 +381,43 @@ impl Emulator {
     pub fn visible_string(&self) -> String {
         self.visible_text().join("\n").trim_end().to_string()
     }
+}
+
+/// How a selection expands as it is dragged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectionMode {
+    /// Exactly the cells dragged over.
+    Simple,
+    /// A rectangular region.
+    Block,
+    /// Whole words, as a double-click gives.
+    Word,
+    /// Whole lines, as a triple-click gives.
+    Line,
+}
+
+impl From<SelectionMode> for SelectionType {
+    fn from(mode: SelectionMode) -> Self {
+        match mode {
+            SelectionMode::Simple => SelectionType::Simple,
+            SelectionMode::Block => SelectionType::Block,
+            SelectionMode::Word => SelectionType::Semantic,
+            SelectionMode::Line => SelectionType::Lines,
+        }
+    }
+}
+
+/// Escape regular-expression metacharacters so a search is literal.
+fn escape_literal(pattern: &str) -> String {
+    const META: &str = r"\.+*?()|[]{}^$#&-~";
+    let mut escaped = String::with_capacity(pattern.len());
+    for character in pattern.chars() {
+        if META.contains(character) {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    escaped
 }
 
 /// Translate one engine cell into the flat representation the renderer reads.
@@ -469,6 +641,169 @@ mod tests {
             snapshot.cursor.col < 20 && snapshot.cursor.row < 5,
             "cursor left the grid: {:?}",
             snapshot.cursor
+        );
+    }
+
+    // --- selection ---
+
+    #[test]
+    fn a_dragged_selection_yields_its_text() {
+        let mut e = emulator();
+        e.advance(b"hello world");
+
+        e.start_selection(0, 0, false, SelectionMode::Simple);
+        e.update_selection(4, 0, true);
+
+        assert!(e.has_selection());
+        assert_eq!(e.selected_text().as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn word_selection_expands_to_word_boundaries() {
+        let mut e = emulator();
+        e.advance(b"hello world");
+
+        // Anchored mid-word, as a double-click would be.
+        e.start_selection(7, 0, false, SelectionMode::Word);
+
+        assert_eq!(e.selected_text().as_deref(), Some("world"));
+    }
+
+    #[test]
+    fn line_selection_takes_the_whole_line() {
+        let mut e = emulator();
+        e.advance(b"first line\r\nsecond line");
+
+        e.start_selection(3, 0, false, SelectionMode::Line);
+
+        // The newline is part of a line selection: pasting a selected line
+        // should behave like pasting a line, not like joining it to the next.
+        assert_eq!(e.selected_text().as_deref(), Some("first line\n"));
+    }
+
+    #[test]
+    fn clearing_removes_the_selection() {
+        let mut e = emulator();
+        e.advance(b"text");
+        e.start_selection(0, 0, false, SelectionMode::Simple);
+        e.update_selection(3, 0, true);
+        assert!(e.has_selection());
+
+        e.clear_selection();
+
+        assert!(!e.has_selection());
+        assert_eq!(e.selected_text(), None);
+    }
+
+    /// Selection reaches the renderer as a per-cell flag, so it never has to
+    /// reason about wrapped lines or block regions.
+    #[test]
+    fn selected_cells_are_flagged_in_the_snapshot() {
+        let mut e = emulator();
+        e.advance(b"abcdef");
+        e.start_selection(1, 0, false, SelectionMode::Simple);
+        e.update_selection(3, 0, true);
+
+        let snapshot = e.snapshot();
+
+        assert_eq!(snapshot.cell(0, 0).unwrap().flags & flags::SELECTED, 0);
+        for col in 1..=3 {
+            assert_ne!(
+                snapshot.cell(col, 0).unwrap().flags & flags::SELECTED,
+                0,
+                "column {col} should be selected"
+            );
+        }
+        assert_eq!(snapshot.cell(4, 0).unwrap().flags & flags::SELECTED, 0);
+    }
+
+    #[test]
+    fn selection_survives_into_scrollback_text() {
+        let mut e = Emulator::new(SizeInCells::new(20, 3), 100);
+        e.advance(b"line one\r\nline two\r\nline three");
+
+        e.start_selection(0, 0, false, SelectionMode::Simple);
+        e.update_selection(7, 1, true);
+
+        let text = e.selected_text().unwrap();
+        assert!(text.contains("line one"), "got {text:?}");
+        assert!(text.contains("line two"), "got {text:?}");
+    }
+
+    // --- search ---
+
+    #[test]
+    fn find_selects_the_match() {
+        let mut e = emulator();
+        e.advance(b"alpha beta gamma");
+
+        assert!(e.find("beta", true));
+        assert_eq!(e.selected_text().as_deref(), Some("beta"));
+    }
+
+    #[test]
+    fn find_reports_failure_for_absent_text() {
+        let mut e = emulator();
+        e.advance(b"alpha beta");
+
+        assert!(!e.find("zeta", true));
+    }
+
+    /// Searching is literal. Treating input as a regex would make `a.out` match
+    /// `about`, which is a puzzle rather than a search.
+    #[test]
+    fn find_treats_the_pattern_literally() {
+        let mut e = emulator();
+        e.advance(b"about a.out");
+
+        assert!(e.find("a.out", true));
+        assert_eq!(e.selected_text().as_deref(), Some("a.out"));
+    }
+
+    #[test]
+    fn repeated_searches_advance_through_matches() {
+        let mut e = Emulator::new(SizeInCells::new(30, 5), 100);
+        e.advance(b"match one\r\nmatch two\r\nmatch three");
+
+        assert!(e.find("match", true));
+        let first = e.selection_start();
+        assert!(e.find("match", true));
+        let second = e.selection_start();
+
+        assert_ne!(first, second, "the search stayed on the same match");
+    }
+
+    #[test]
+    fn searching_backwards_finds_earlier_text() {
+        let mut e = Emulator::new(SizeInCells::new(30, 5), 100);
+        e.advance(b"needle one\r\nfiller\r\nneedle two");
+
+        assert!(e.find("needle", false));
+        assert_eq!(e.selected_text().as_deref(), Some("needle"));
+    }
+
+    #[test]
+    fn find_scrolls_a_match_in_scrollback_into_view() {
+        let mut e = Emulator::new(SizeInCells::new(20, 3), 100);
+        e.advance(b"buried treasure\r\n");
+        for line in 0..10 {
+            e.advance(format!("filler{line}\r\n").as_bytes());
+        }
+        assert!(e.snapshot().history_len > 0);
+
+        assert!(e.find("treasure", false));
+
+        let snapshot = e.snapshot();
+        assert!(
+            snapshot.display_offset > 0,
+            "the viewport did not scroll back to the match"
+        );
+        assert!(
+            (0..snapshot.rows).any(|row| {
+                (0..snapshot.cols)
+                    .any(|col| snapshot.cell(col, row).unwrap().flags & flags::SELECTED != 0)
+            }),
+            "the match is not visible in the viewport"
         );
     }
 
