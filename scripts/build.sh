@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Builds newt: Cargo core first, then the Swift shell that links it.
+# Builds newt: Cargo core first, then the Swift shell that links it, then the
+# app bundle for release builds.
 #
 # macOS ships bash 3.2, where "${arr[@]}" on an empty array trips `set -u`;
 # the ${arr[@]+...} guard below is what keeps that working.
@@ -28,4 +29,40 @@ cp "$REPO_ROOT/core/target/$CONFIG/libnewt_ffi.a" "$REPO_ROOT/macos/lib/libnewt_
 echo "==> swift build ($CONFIG)"
 swift build --package-path "$REPO_ROOT/macos" ${SWIFT_FLAGS[@]+"${SWIFT_FLAGS[@]}"}
 
-echo "==> built $REPO_ROOT/macos/.build/$CONFIG/NewtApp"
+BINARY="$REPO_ROOT/macos/.build/$CONFIG/NewtApp"
+
+if [ "$CONFIG" != "release" ]; then
+  echo "==> built $BINARY"
+  exit 0
+fi
+
+APP="$REPO_ROOT/newt.app"
+RESOURCES="$REPO_ROOT/macos/Resources"
+
+echo "==> bundling $APP"
+# The icon is generated rather than checked in; regenerate only when missing so
+# a release build does not depend on a stale artifact or rebuild it needlessly.
+if [ ! -f "$RESOURCES/newt.icns" ]; then
+  swift "$REPO_ROOT/scripts/make-icon.swift" "$RESOURCES/newt.icns"
+fi
+
+rm -rf "$APP"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+
+# The bundle executable is named for the product, not the SwiftPM target.
+cp "$BINARY" "$APP/Contents/MacOS/newt"
+cp "$RESOURCES/Info.plist" "$APP/Contents/Info.plist"
+cp "$RESOURCES/newt.icns" "$APP/Contents/Resources/newt.icns"
+
+echo "==> signing (ad-hoc)"
+# Absolute path on purpose: package managers (conda among them) put their own
+# `codesign` shim earlier on PATH, and it does not take Apple's arguments.
+#
+# Ad-hoc is enough to run locally and needs no Apple Developer account. There is
+# no nested code, so --deep (deprecated anyway) is unnecessary.
+/usr/bin/codesign --force --sign - "$APP"
+/usr/bin/codesign --verify --strict "$APP"
+
+echo "==> built $APP"
+echo "    run:     open $APP"
+echo "    install: cp -R $APP /Applications/"

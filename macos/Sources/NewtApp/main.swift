@@ -70,7 +70,9 @@ if let flag = arguments.firstIndex(of: "--render-to"), flag + 1 < arguments.coun
 }
 
 let delegate = AppDelegate()
-delegate.initialCommand = arguments.first
+// Launched from Finder, macOS passes arguments of its own (-psn_0_12345 and
+// friends). Typing those into the user's shell would be a memorable bug.
+delegate.initialCommand = arguments.first.flatMap { $0.hasPrefix("-") ? nil : $0 }
 application.delegate = delegate
 
 application.run()

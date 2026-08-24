@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>newt</string>
+	<key>CFBundleDisplayName</key>
+	<string>newt</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.shashwatkadam.newt</string>
+	<key>CFBundleExecutable</key>
+	<string>newt</string>
+	<key>CFBundleIconFile</key>
+	<string>newt</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundleVersion</key>
+	<string>0.1.0</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.developer-tools</string>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<!-- The shell inherits the app's environment, so a terminal legitimately
+	     needs whatever the user's own commands need. -->
+	<key>NSDesktopFolderUsageDescription</key>
+	<string>newt runs commands you type, which may read files on your Desktop.</string>
+	<key>NSDocumentsFolderUsageDescription</key>
+	<string>newt runs commands you type, which may read files in your Documents folder.</string>
+	<key>NSDownloadsFolderUsageDescription</key>
+	<string>newt runs commands you type, which may read files in your Downloads folder.</string>
+</dict>
+</plist>

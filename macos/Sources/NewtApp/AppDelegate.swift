@@ -29,6 +29,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         true
     }
 
+    /// Clicking the dock icon with no windows open should give you a terminal,
+    /// not nothing.
+    func applicationShouldHandleReopen(
+        _ sender: NSApplication,
+        hasVisibleWindows: Bool
+    ) -> Bool {
+        if !hasVisibleWindows {
+            newWindow(nil)
+        }
+        return true
+    }
+
     // MARK: - Windows and tabs
 
     @discardableResult
