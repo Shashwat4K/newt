@@ -12,6 +12,7 @@ import NewtKit
 enum OfflineRender {
     static func run(
         command: String?,
+        typed: [String] = [],
         outputPath: String,
         cols: UInt16,
         rows: UInt16,
@@ -28,6 +29,23 @@ enum OfflineRender {
         if let command {
             try session.write("\(command)\n")
             settle(session)
+        }
+
+        // Typed steps go through the real input path — key events encoded by
+        // the core — rather than through `write`, so this exercises what the
+        // keyboard actually does.
+        for step in typed {
+            try type(step, into: session)
+            FileHandle.standardError.write(Data("typed \(step)\n".utf8))
+            // A longer quiet period than the initial settle: a full-screen
+            // program can look idle mid-startup and then flush pending input
+            // when it finally enters raw mode, swallowing what was typed.
+            settle(session, quietPeriod: 0.9)
+            let preview = (try? session.withSnapshot { $0.text() })?
+                .split(separator: "\n")
+                .prefix(2)
+                .joined(separator: " | ") ?? ""
+            FileHandle.standardError.write(Data("  -> \(preview)\n".utf8))
         }
 
         let view = TerminalView(font: font, cols: Int(cols), rows: Int(rows))
@@ -47,6 +65,38 @@ enum OfflineRender {
         FileHandle.standardError.write(
             Data("wrote \(outputPath) (\(bitmap.pixelsWide)x\(bitmap.pixelsHigh))\n\(text)\n".utf8)
         )
+    }
+
+    /// Send one step as key events. Named keys are written as `<name>`.
+    private static func type(_ step: String, into session: TerminalSession) throws {
+        if step.hasPrefix("<"), step.hasSuffix(">") {
+            let name = String(step.dropFirst().dropLast()).lowercased()
+            guard let key = namedKey(name) else { return }
+            try session.send(key: key)
+            return
+        }
+
+        for scalar in step.unicodeScalars {
+            try session.send(key: .character(scalar))
+        }
+    }
+
+    private static func namedKey(_ name: String) -> TerminalKey? {
+        switch name {
+        case "enter", "return": return .enter
+        case "escape", "esc": return .escape
+        case "tab": return .tab
+        case "backspace": return .backspace
+        case "up": return .up
+        case "down": return .down
+        case "left": return .left
+        case "right": return .right
+        case "home": return .home
+        case "end": return .end
+        case "pageup": return .pageUp
+        case "pagedown": return .pageDown
+        default: return nil
+        }
     }
 
     enum RenderError: Error {

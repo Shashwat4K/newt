@@ -1,4 +1,5 @@
 import AppKit
+import Foundation
 import NewtKit
 
 /// Owns one window, its view, and the session behind it.
@@ -10,8 +11,8 @@ import NewtKit
 @MainActor
 final class TerminalWindowController: NSObject, NSWindowDelegate {
     let window: NSWindow
-    private let view: TerminalView
-    private let session: TerminalSession
+    let view: TerminalView
+    let session: TerminalSession
     private var displayLink: CADisplayLink?
     private var lastTitle: String?
 
@@ -35,6 +36,7 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
 
         super.init()
         window.delegate = self
+        view.inputDelegate = self
 
         // Report real cell metrics so the terminal can answer pixel-size
         // queries from full-screen programs.
@@ -47,6 +49,8 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
     /// Show the window and begin sampling the session.
     func start(runningCommand command: String?) {
         window.makeKeyAndOrderFront(nil)
+        // Keystrokes reach the terminal only while the view holds focus.
+        window.makeFirstResponder(view)
 
         let link = view.displayLink(target: self, selector: #selector(tick))
         link.add(to: .main, forMode: .common)
@@ -84,8 +88,58 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
         }
     }
 
+    // MARK: - Input
+
+    /// Input is forwarded verbatim; the core decides what bytes each event
+    /// produces, because that depends on terminal modes it alone tracks.
+    private func report(_ error: Error) {
+        FileHandle.standardError.write(Data("newt: \(error)\n".utf8))
+    }
+
     func windowWillClose(_ notification: Notification) {
         stop()
         NSApp.terminate(nil)
+    }
+}
+
+
+extension TerminalWindowController: TerminalInputDelegate {
+    func terminalView(_ view: TerminalView, send key: TerminalKey, modifiers: KeyModifiers) {
+        do { try session.send(key: key, modifiers: modifiers) } catch { report(error) }
+    }
+
+    func terminalView(_ view: TerminalView, sendText text: String) {
+        do { try session.send(text: text) } catch { report(error) }
+    }
+
+    @discardableResult
+    func terminalView(
+        _ view: TerminalView,
+        sendMouse kind: MouseEventKind,
+        button: MouseButton,
+        col: UInt16,
+        row: UInt16,
+        modifiers: KeyModifiers
+    ) -> Bool {
+        do {
+            return try session.send(
+                mouse: kind,
+                button: button,
+                col: col,
+                row: row,
+                modifiers: modifiers
+            )
+        } catch {
+            report(error)
+            return false
+        }
+    }
+
+    func terminalView(_ view: TerminalView, scrollByLines lines: Int32) {
+        session.scroll(by: lines)
+    }
+
+    func terminalView(_ view: TerminalView, paste text: String) {
+        do { try session.paste(text) } catch { report(error) }
     }
 }

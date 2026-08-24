@@ -1,0 +1,24 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:newt-proto}/macos",
+            "name": "Debug NewtApp (macos)",
+            "target": "NewtApp",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug NewtApp (macos)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:newt-proto}/macos",
+            "name": "Release NewtApp (macos)",
+            "target": "NewtApp",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release NewtApp (macos)"
+        }
+    ]
+}

@@ -8,6 +8,7 @@
 
 use std::time::{Duration, Instant};
 
+use newt_core::input::{Key, KeyEvent};
 use newt_core::{Direction, SessionConfig, SizeInCells};
 
 /// Default time output must stay unchanged before the screen is considered
@@ -19,7 +20,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let (size, command, trace_enabled, quiet_period) = parse_args(&args);
+    let (size, command, trace_enabled, quiet_period, keys) = parse_args(&args);
 
     let config = SessionConfig {
         size,
@@ -56,6 +57,16 @@ fn main() {
         std::process::exit(1);
     }
     settle(&session, WaitFor::Quiet, quiet_period);
+
+    // Typed steps go through the key-encoding path rather than raw writes, so
+    // `--trace` shows exactly what a keystroke puts on the wire.
+    for step in &keys {
+        if let Err(e) = send_step(&session, step) {
+            eprintln!("newt: {e}");
+            std::process::exit(1);
+        }
+        settle(&session, WaitFor::Quiet, quiet_period);
+    }
 
     let (text, cursor) = session.with_emulator(|e| (e.visible_string(), e.cursor()));
     println!("{text}");
@@ -102,6 +113,32 @@ fn settle(session: &newt_core::Session, wait_for: WaitFor, quiet_period: Duratio
     }
 }
 
+/// Send one step as key events. `<name>` is a named key; anything else is
+/// typed character by character.
+fn send_step(session: &newt_core::Session, step: &str) -> newt_core::Result<()> {
+    if let Some(name) = step.strip_prefix('<').and_then(|s| s.strip_suffix('>')) {
+        let key = match name.to_ascii_lowercase().as_str() {
+            "enter" | "return" => Key::Enter,
+            "escape" | "esc" => Key::Escape,
+            "tab" => Key::Tab,
+            "backspace" => Key::Backspace,
+            "up" => Key::Up,
+            "down" => Key::Down,
+            "left" => Key::Left,
+            "right" => Key::Right,
+            "home" => Key::Home,
+            "end" => Key::End,
+            _ => return Ok(()),
+        };
+        return session.send_key(KeyEvent::new(key, 0));
+    }
+
+    for character in step.chars() {
+        session.send_key(KeyEvent::new(Key::Char(character), 0))?;
+    }
+    Ok(())
+}
+
 /// Render bytes readably: printable ASCII as-is, everything else escaped.
 fn escape(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len() * 2);
@@ -118,12 +155,13 @@ fn escape(bytes: &[u8]) -> String {
     out
 }
 
-fn parse_args(args: &[String]) -> (SizeInCells, String, bool, Duration) {
+fn parse_args(args: &[String]) -> (SizeInCells, String, bool, Duration, Vec<String>) {
     let mut cols = 80u16;
     let mut rows = 24u16;
     let mut trace = false;
     let mut quiet_period_ms = DEFAULT_QUIET_PERIOD_MS;
     let mut command = String::from("echo newt is alive");
+    let mut keys: Vec<String> = Vec::new();
 
     let mut i = 0;
     while i < args.len() {
@@ -147,6 +185,11 @@ fn parse_args(args: &[String]) -> (SizeInCells, String, bool, Duration) {
                 trace = true;
                 i += 1;
             }
+            // Everything after --keys is typed, one step per argument.
+            "--keys" => {
+                keys = args[(i + 1)..].to_vec();
+                i = args.len();
+            }
             other => {
                 command = other.to_string();
                 i += 1;
@@ -159,5 +202,6 @@ fn parse_args(args: &[String]) -> (SizeInCells, String, bool, Duration) {
         command,
         trace,
         Duration::from_millis(quiet_period_ms),
+        keys,
     )
 }

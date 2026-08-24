@@ -9,6 +9,9 @@ import Foundation
 public final class TerminalSession {
     private let handle: OpaquePointer
 
+    /// The raw ABI handle, for the input extensions in this module.
+    var rawHandle: OpaquePointer { handle }
+
     /// Start a session.
     ///
     /// - Parameters:

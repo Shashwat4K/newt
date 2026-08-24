@@ -13,8 +13,19 @@ import NewtKit
 /// already applied by the core; this file only turns cells into pixels.
 @MainActor
 final class TerminalView: NSView {
-    private let font: TerminalFont
+    let font: TerminalFont
     private var buffer = GridBuffer()
+
+    /// Receives input events. The view draws; the controller owns the session.
+    weak var inputDelegate: TerminalInputDelegate?
+
+    /// Text being composed by an input method, before it is committed.
+    ///
+    /// Held so the input system can query and replace it. It is not drawn yet —
+    /// showing composition in the grid needs a preedit overlay, which is
+    /// deliberately left until after the MVP.
+    var markedText = ""
+
 
     /// Background painted outside the glyph cells, taken from the grid so the
     /// window matches the terminal rather than guessing a color.
@@ -52,6 +63,19 @@ final class TerminalView: NSView {
     }
 
     override var isOpaque: Bool { true }
+
+    /// Current grid size, for translating mouse positions into cells.
+    var gridSize: (cols: Int, rows: Int) { (buffer.cols, buffer.rows) }
+
+    /// Where the cursor is on screen, for positioning the IME candidate window.
+    var cursorRectInView: NSRect {
+        NSRect(
+            x: CGFloat(buffer.cursor.col) * font.cellWidth,
+            y: bounds.height - CGFloat(Int(buffer.cursor.row) + 1) * font.cellHeight,
+            width: font.cellWidth,
+            height: font.cellHeight
+        )
+    }
 
     override func draw(_ dirtyRect: NSRect) {
         guard let context = NSGraphicsContext.current?.cgContext else { return }

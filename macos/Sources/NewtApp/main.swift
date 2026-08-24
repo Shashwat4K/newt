@@ -18,11 +18,22 @@ let arguments = Array(CommandLine.arguments.dropFirst())
 // Offscreen mode: draw one frame to a PNG and exit, without a window.
 if let flag = arguments.firstIndex(of: "--render-to"), flag + 1 < arguments.count {
     let path = arguments[flag + 1]
-    let command = arguments.count > flag + 2 ? arguments[flag + 2] : nil
+    let commandArgument = arguments.count > flag + 2 ? arguments[flag + 2] : nil
+    let command = commandArgument == "--type" ? nil : commandArgument
+
+    // Everything after --type is typed as key events, one step per argument.
+    // A step of the form <name> is a named key, e.g. <enter> or <escape>.
+    let typed: [String]
+    if let typeFlag = arguments.firstIndex(of: "--type") {
+        typed = Array(arguments[(typeFlag + 1)...])
+    } else {
+        typed = []
+    }
     application.setActivationPolicy(.prohibited)
     do {
         try OfflineRender.run(
             command: command,
+            typed: typed,
             outputPath: path,
             cols: 100,
             rows: 30,

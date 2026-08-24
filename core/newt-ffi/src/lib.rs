@@ -25,6 +25,7 @@ use std::ffi::{c_char, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 
+use newt_core::input::{self, Key, KeyEvent, MouseEvent, MouseKind};
 use newt_core::snapshot::{cursor_shape, flags, Cell, Cursor, DamagedRow};
 use newt_core::{Session as CoreSession, SessionConfig, SizeInCells, Snapshot as CoreSnapshot};
 
@@ -52,6 +53,43 @@ pub const NEWT_CURSOR_BEAM: u8 = 2;
 pub const NEWT_CURSOR_HOLLOW_BLOCK: u8 = 3;
 pub const NEWT_CURSOR_HIDDEN: u8 = 4;
 
+// Key identifiers. Values below 0x110000 are Unicode scalars — the character
+// the platform's layout produced. Named keys live above that range so the two
+// can share one parameter without a discriminant.
+pub const NEWT_KEY_ENTER: u32 = 0x1000_0001;
+pub const NEWT_KEY_TAB: u32 = 0x1000_0002;
+pub const NEWT_KEY_BACKSPACE: u32 = 0x1000_0003;
+pub const NEWT_KEY_ESCAPE: u32 = 0x1000_0004;
+pub const NEWT_KEY_DELETE: u32 = 0x1000_0005;
+pub const NEWT_KEY_INSERT: u32 = 0x1000_0006;
+pub const NEWT_KEY_UP: u32 = 0x1000_0007;
+pub const NEWT_KEY_DOWN: u32 = 0x1000_0008;
+pub const NEWT_KEY_LEFT: u32 = 0x1000_0009;
+pub const NEWT_KEY_RIGHT: u32 = 0x1000_000a;
+pub const NEWT_KEY_HOME: u32 = 0x1000_000b;
+pub const NEWT_KEY_END: u32 = 0x1000_000c;
+pub const NEWT_KEY_PAGE_UP: u32 = 0x1000_000d;
+pub const NEWT_KEY_PAGE_DOWN: u32 = 0x1000_000e;
+/// F1 is this value; Fn is `NEWT_KEY_F1 + (n - 1)`, up to F20.
+pub const NEWT_KEY_F1: u32 = 0x1000_0100;
+
+// Modifier bits.
+pub const NEWT_MOD_SHIFT: u8 = 1 << 0;
+pub const NEWT_MOD_ALT: u8 = 1 << 1;
+pub const NEWT_MOD_CTRL: u8 = 1 << 2;
+/// Command on macOS. Never reaches the child; it drives app shortcuts.
+pub const NEWT_MOD_SUPER: u8 = 1 << 3;
+
+// Mouse event kinds.
+pub const NEWT_MOUSE_PRESS: u8 = 0;
+pub const NEWT_MOUSE_RELEASE: u8 = 1;
+pub const NEWT_MOUSE_MOTION: u8 = 2;
+pub const NEWT_MOUSE_SCROLL_UP: u8 = 3;
+pub const NEWT_MOUSE_SCROLL_DOWN: u8 = 4;
+
+/// Button value meaning "no button held", for motion events.
+pub const NEWT_MOUSE_NO_BUTTON: u8 = 255;
+
 const _: () = {
     assert!(NEWT_FLAG_BOLD == flags::BOLD);
     assert!(NEWT_FLAG_ITALIC == flags::ITALIC);
@@ -72,7 +110,48 @@ const _: () = {
     assert!(NEWT_CURSOR_BEAM == cursor_shape::BEAM);
     assert!(NEWT_CURSOR_HOLLOW_BLOCK == cursor_shape::HOLLOW_BLOCK);
     assert!(NEWT_CURSOR_HIDDEN == cursor_shape::HIDDEN);
+
+    assert!(NEWT_MOD_SHIFT == input::modifiers::SHIFT);
+    assert!(NEWT_MOD_ALT == input::modifiers::ALT);
+    assert!(NEWT_MOD_CTRL == input::modifiers::CTRL);
+    assert!(NEWT_MOD_SUPER == input::modifiers::SUPER);
+    assert!(NEWT_MOUSE_NO_BUTTON == input::NO_BUTTON);
 };
+
+/// Translate an ABI key identifier into a core key.
+fn decode_key(value: u32) -> Option<Key> {
+    match value {
+        NEWT_KEY_ENTER => Some(Key::Enter),
+        NEWT_KEY_TAB => Some(Key::Tab),
+        NEWT_KEY_BACKSPACE => Some(Key::Backspace),
+        NEWT_KEY_ESCAPE => Some(Key::Escape),
+        NEWT_KEY_DELETE => Some(Key::Delete),
+        NEWT_KEY_INSERT => Some(Key::Insert),
+        NEWT_KEY_UP => Some(Key::Up),
+        NEWT_KEY_DOWN => Some(Key::Down),
+        NEWT_KEY_LEFT => Some(Key::Left),
+        NEWT_KEY_RIGHT => Some(Key::Right),
+        NEWT_KEY_HOME => Some(Key::Home),
+        NEWT_KEY_END => Some(Key::End),
+        NEWT_KEY_PAGE_UP => Some(Key::PageUp),
+        NEWT_KEY_PAGE_DOWN => Some(Key::PageDown),
+        value if (NEWT_KEY_F1..NEWT_KEY_F1 + 20).contains(&value) => {
+            Some(Key::Function((value - NEWT_KEY_F1 + 1) as u8))
+        }
+        value => char::from_u32(value).map(Key::Char),
+    }
+}
+
+fn decode_mouse_kind(value: u8) -> Option<MouseKind> {
+    match value {
+        NEWT_MOUSE_PRESS => Some(MouseKind::Press),
+        NEWT_MOUSE_RELEASE => Some(MouseKind::Release),
+        NEWT_MOUSE_MOTION => Some(MouseKind::Motion),
+        NEWT_MOUSE_SCROLL_UP => Some(MouseKind::ScrollUp),
+        NEWT_MOUSE_SCROLL_DOWN => Some(MouseKind::ScrollDown),
+        _ => None,
+    }
+}
 
 thread_local! {
     static LAST_ERROR: RefCell<Option<CString>> = const { RefCell::new(None) };
@@ -388,6 +467,148 @@ pub unsafe extern "C" fn newt_session_title(handle: *mut NewtSession) -> *const 
     }
 }
 
+/// Send a key press.
+///
+/// `key` is a Unicode scalar for character keys, or one of the `NEWT_KEY_*`
+/// constants. Encoding depends on the terminal's current modes, so it happens
+/// in the core rather than in the caller.
+///
+/// # Safety
+///
+/// `handle` must be live.
+#[no_mangle]
+pub unsafe extern "C" fn newt_session_send_key(
+    handle: *mut NewtSession,
+    key: u32,
+    mods: u8,
+) -> bool {
+    with_session(handle, |session| {
+        let Some(key) = decode_key(key) else {
+            set_last_error("unknown key identifier");
+            return false;
+        };
+
+        match session.session.send_key(KeyEvent::new(key, mods)) {
+            Ok(()) => true,
+            Err(e) => {
+                set_last_error(e.to_string());
+                false
+            }
+        }
+    })
+}
+
+/// Send text produced by the platform, such as an IME commit.
+///
+/// # Safety
+///
+/// `handle` must be live, and `text` must point to `len` bytes of UTF-8.
+#[no_mangle]
+pub unsafe extern "C" fn newt_session_send_text(
+    handle: *mut NewtSession,
+    text: *const u8,
+    len: usize,
+) -> bool {
+    with_session(handle, |session| match borrow_str(text, len) {
+        Ok(text) => match session.session.send_text(text) {
+            Ok(()) => true,
+            Err(e) => {
+                set_last_error(e.to_string());
+                false
+            }
+        },
+        Err(message) => {
+            set_last_error(message);
+            false
+        }
+    })
+}
+
+/// Send a mouse event.
+///
+/// `handled` is set to whether the terminal wanted the event; when false the
+/// caller should apply its own behavior, such as scrolling the viewport.
+///
+/// # Safety
+///
+/// `handle` must be live; `handled` may be null.
+#[no_mangle]
+pub unsafe extern "C" fn newt_session_send_mouse(
+    handle: *mut NewtSession,
+    kind: u8,
+    button: u8,
+    col: u16,
+    row: u16,
+    mods: u8,
+    handled: *mut bool,
+) -> bool {
+    with_session(handle, |session| {
+        let Some(kind) = decode_mouse_kind(kind) else {
+            set_last_error("unknown mouse event kind");
+            return false;
+        };
+
+        let event = MouseEvent {
+            kind,
+            button,
+            col,
+            row,
+            mods,
+        };
+        match session.session.send_mouse(event) {
+            Ok(was_handled) => {
+                if !handled.is_null() {
+                    handled.write(was_handled);
+                }
+                true
+            }
+            Err(e) => {
+                set_last_error(e.to_string());
+                false
+            }
+        }
+    })
+}
+
+/// Paste text, bracketed when the program has asked for it.
+///
+/// # Safety
+///
+/// `handle` must be live, and `text` must point to `len` bytes of UTF-8.
+#[no_mangle]
+pub unsafe extern "C" fn newt_session_send_paste(
+    handle: *mut NewtSession,
+    text: *const u8,
+    len: usize,
+) -> bool {
+    with_session(handle, |session| match borrow_str(text, len) {
+        Ok(text) => match session.session.send_paste(text) {
+            Ok(()) => true,
+            Err(e) => {
+                set_last_error(e.to_string());
+                false
+            }
+        },
+        Err(message) => {
+            set_last_error(message);
+            false
+        }
+    })
+}
+
+/// Borrow caller-owned bytes as UTF-8, rejecting anything malformed rather
+/// than sending replacement characters to the child.
+unsafe fn borrow_str<'a>(pointer: *const u8, len: usize) -> Result<&'a str, &'static str> {
+    if len == 0 {
+        return Ok("");
+    }
+    if pointer.is_null() {
+        return Err("text pointer was null");
+    }
+    std::str::from_utf8(std::slice::from_raw_parts(pointer, len))
+        .map_err(|_| "text was not valid UTF-8")
+}
+
 /// Run `f` with a live session, translating null handles and panics into a
 /// `false` return so neither can cross the ABI.
 unsafe fn with_session(handle: *mut NewtSession, f: impl FnOnce(&mut NewtSession) -> bool) -> bool {
@@ -424,6 +645,49 @@ mod tests {
         let ptr = newt_version();
         let s = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap();
         assert_eq!(s, env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn key_identifiers_decode_to_the_right_keys() {
+        assert_eq!(decode_key('a' as u32), Some(Key::Char('a')));
+        assert_eq!(decode_key('中' as u32), Some(Key::Char('中')));
+        assert_eq!(decode_key(NEWT_KEY_ENTER), Some(Key::Enter));
+        assert_eq!(decode_key(NEWT_KEY_PAGE_DOWN), Some(Key::PageDown));
+        assert_eq!(decode_key(NEWT_KEY_F1), Some(Key::Function(1)));
+        assert_eq!(decode_key(NEWT_KEY_F1 + 11), Some(Key::Function(12)));
+        // Past F20 there is no key, and the value is not a valid scalar.
+        assert_eq!(decode_key(NEWT_KEY_F1 + 25), None);
+    }
+
+    #[test]
+    fn typing_reaches_the_child() {
+        unsafe {
+            let shell = CString::new("/bin/sh").unwrap();
+            let handle = newt_session_new(40, 8, shell.as_ptr(), std::ptr::null(), 100);
+            assert!(!handle.is_null());
+
+            for character in "printf 'typed'".chars() {
+                assert!(newt_session_send_key(handle, character as u32, 0));
+            }
+            assert!(newt_session_send_key(handle, NEWT_KEY_ENTER, 0));
+
+            let mut snapshot = std::mem::zeroed::<NewtSnapshot>();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let mut found = false;
+            while std::time::Instant::now() < deadline && !found {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                assert!(newt_session_snapshot(handle, &mut snapshot));
+                let cells = std::slice::from_raw_parts(snapshot.cells, snapshot.cell_count);
+                let text: String = cells
+                    .iter()
+                    .filter_map(|cell| char::from_u32(cell.codepoint))
+                    .collect();
+                found = text.contains("typed");
+            }
+
+            assert!(found, "typed keys never reached the child");
+            newt_session_free(handle);
+        }
     }
 
     #[test]

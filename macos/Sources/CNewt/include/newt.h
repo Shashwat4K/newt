@@ -46,6 +46,59 @@
 
 #define NEWT_CURSOR_HIDDEN 4
 
+#define NEWT_KEY_ENTER 268435457
+
+#define NEWT_KEY_TAB 268435458
+
+#define NEWT_KEY_BACKSPACE 268435459
+
+#define NEWT_KEY_ESCAPE 268435460
+
+#define NEWT_KEY_DELETE 268435461
+
+#define NEWT_KEY_INSERT 268435462
+
+#define NEWT_KEY_UP 268435463
+
+#define NEWT_KEY_DOWN 268435464
+
+#define NEWT_KEY_LEFT 268435465
+
+#define NEWT_KEY_RIGHT 268435466
+
+#define NEWT_KEY_HOME 268435467
+
+#define NEWT_KEY_END 268435468
+
+#define NEWT_KEY_PAGE_UP 268435469
+
+#define NEWT_KEY_PAGE_DOWN 268435470
+
+// F1 is this value; Fn is `NEWT_KEY_F1 + (n - 1)`, up to F20.
+#define NEWT_KEY_F1 268435712
+
+#define NEWT_MOD_SHIFT (1 << 0)
+
+#define NEWT_MOD_ALT (1 << 1)
+
+#define NEWT_MOD_CTRL (1 << 2)
+
+// Command on macOS. Never reaches the child; it drives app shortcuts.
+#define NEWT_MOD_SUPER (1 << 3)
+
+#define NEWT_MOUSE_PRESS 0
+
+#define NEWT_MOUSE_RELEASE 1
+
+#define NEWT_MOUSE_MOTION 2
+
+#define NEWT_MOUSE_SCROLL_UP 3
+
+#define NEWT_MOUSE_SCROLL_DOWN 4
+
+// Button value meaning "no button held", for motion events.
+#define NEWT_MOUSE_NO_BUTTON 255
+
 // A running terminal session. Opaque to C.
 typedef struct NewtSession NewtSession;
 
@@ -207,6 +260,47 @@ bool newt_session_has_exited(NewtSession *handle);
 //
 // `handle` must be live.
 const char *newt_session_title(NewtSession *handle);
+
+// Send a key press.
+//
+// `key` is a Unicode scalar for character keys, or one of the `NEWT_KEY_*`
+// constants. Encoding depends on the terminal's current modes, so it happens
+// in the core rather than in the caller.
+//
+// # Safety
+//
+// `handle` must be live.
+bool newt_session_send_key(NewtSession *handle, uint32_t key, uint8_t mods);
+
+// Send text produced by the platform, such as an IME commit.
+//
+// # Safety
+//
+// `handle` must be live, and `text` must point to `len` bytes of UTF-8.
+bool newt_session_send_text(NewtSession *handle, const uint8_t *text, uintptr_t len);
+
+// Send a mouse event.
+//
+// `handled` is set to whether the terminal wanted the event; when false the
+// caller should apply its own behavior, such as scrolling the viewport.
+//
+// # Safety
+//
+// `handle` must be live; `handled` may be null.
+bool newt_session_send_mouse(NewtSession *handle,
+                             uint8_t kind,
+                             uint8_t button,
+                             uint16_t col,
+                             uint16_t row,
+                             uint8_t mods,
+                             bool *handled);
+
+// Paste text, bracketed when the program has asked for it.
+//
+// # Safety
+//
+// `handle` must be live, and `text` must point to `len` bytes of UTF-8.
+bool newt_session_send_paste(NewtSession *handle, const uint8_t *text, uintptr_t len);
 
 #ifdef __cplusplus
 }  // extern "C"

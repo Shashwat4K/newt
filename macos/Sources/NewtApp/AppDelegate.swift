@@ -39,8 +39,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let appMenuItem = NSMenuItem()
         appMenuItem.submenu = appMenu
 
+        // Paste goes through the responder chain to the terminal view, which
+        // is what lets the core wrap it in bracketed-paste markers.
+        let editMenu = NSMenu(title: "Edit")
+        editMenu.addItem(
+            withTitle: "Paste",
+            action: #selector(NSText.paste(_:)),
+            keyEquivalent: "v"
+        )
+        let editMenuItem = NSMenuItem()
+        editMenuItem.title = "Edit"
+        editMenuItem.submenu = editMenu
+
         let mainMenu = NSMenu()
         mainMenu.addItem(appMenuItem)
+        mainMenu.addItem(editMenuItem)
         NSApp.mainMenu = mainMenu
     }
 

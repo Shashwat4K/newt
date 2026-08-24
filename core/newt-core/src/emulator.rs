@@ -10,10 +10,11 @@ use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::color::Colors;
-use alacritty_terminal::term::{Config, Term, TermDamage};
+use alacritty_terminal::term::{Config, Term, TermDamage, TermMode};
 use alacritty_terminal::vte::ansi::{Color as EngineColor, CursorShape, Processor};
 
 use crate::events::EventSink;
+use crate::input::InputModes;
 use crate::palette::{default_color, Rgb};
 use crate::snapshot::{cursor_shape, flags, Cell, Color, Cursor, DamagedRow, Snapshot};
 
@@ -208,6 +209,31 @@ impl Emulator {
         let mut out = Snapshot::default();
         self.snapshot_into(&mut out);
         out
+    }
+
+    /// Terminal modes that affect how input is encoded.
+    pub fn modes(&self) -> InputModes {
+        let mode = self.term.mode();
+        InputModes {
+            app_cursor: mode.contains(TermMode::APP_CURSOR),
+            app_keypad: mode.contains(TermMode::APP_KEYPAD),
+            bracketed_paste: mode.contains(TermMode::BRACKETED_PASTE),
+            sgr_mouse: mode.contains(TermMode::SGR_MOUSE),
+            mouse_click: mode.contains(TermMode::MOUSE_REPORT_CLICK),
+            mouse_drag: mode.contains(TermMode::MOUSE_DRAG),
+            mouse_motion: mode.contains(TermMode::MOUSE_MOTION),
+            alt_screen: mode.contains(TermMode::ALT_SCREEN),
+            alternate_scroll: mode.contains(TermMode::ALTERNATE_SCROLL),
+        }
+    }
+
+    /// Jump the viewport back to the live edge.
+    ///
+    /// Typing while scrolled back should show what you are typing — every
+    /// terminal does this, and its absence feels like a freeze.
+    pub fn scroll_to_bottom(&mut self) {
+        self.term
+            .scroll_display(alacritty_terminal::grid::Scroll::Bottom);
     }
 
     /// Scroll the viewport by `delta` lines: positive scrolls into history.
