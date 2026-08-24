@@ -112,6 +112,16 @@
 // Whole lines, as a triple-click gives.
 #define NEWT_SELECTION_LINE 3
 
+#define NEWT_AGENT_UNKNOWN 0
+
+#define NEWT_AGENT_IDLE 1
+
+#define NEWT_AGENT_RUNNING 2
+
+#define NEWT_AGENT_WAITING 3
+
+#define NEWT_AGENT_ERROR 4
+
 // A running terminal session. Opaque to C.
 typedef struct NewtSession NewtSession;
 
@@ -182,6 +192,22 @@ typedef struct {
   // Lines currently held in scrollback.
   uint32_t history_len;
 } NewtSnapshot;
+
+// Per-session bookkeeping for the UI.
+//
+// Present for the end goal — token, cost, and agent-state display alongside
+// the grid. Nothing here affects what is drawn.
+typedef struct {
+  uint64_t input_tokens;
+  uint64_t output_tokens;
+  // Cost in millionths of a currency unit; an integer so long sessions do
+  // not accumulate floating-point drift.
+  uint64_t cost_micros;
+  // One of the `NEWT_AGENT_*` values.
+  uint8_t agent_state;
+  // Model name, or null. Valid until the next metadata call on this session.
+  const char *model;
+} NewtSessionMetadata;
 
 #ifdef __cplusplus
 extern "C" {
@@ -314,6 +340,30 @@ bool newt_session_send_mouse(NewtSession *handle,
 //
 // `handle` must be live, and `text` must point to `len` bytes of UTF-8.
 bool newt_session_send_paste(NewtSession *handle, const uint8_t *text, uintptr_t len);
+
+// Read a session's metadata.
+//
+// `model` in the result borrows session-owned memory and is valid until the
+// next call to this function on the same session.
+//
+// # Safety
+//
+// `handle` must be live and `out` must point to a writable struct.
+bool newt_session_metadata(NewtSession *handle, NewtSessionMetadata *out);
+
+// Replace a session's metadata.
+//
+// # Safety
+//
+// `handle` must be live; `model` may be null, otherwise it must point to
+// `model_len` bytes of UTF-8.
+bool newt_session_set_metadata(NewtSession *handle,
+                               uint64_t input_tokens,
+                               uint64_t output_tokens,
+                               uint64_t cost_micros,
+                               uint8_t agent_state,
+                               const uint8_t *model,
+                               uintptr_t model_len);
 
 // Begin a selection at a viewport cell.
 //

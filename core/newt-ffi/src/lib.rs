@@ -26,6 +26,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 
 use newt_core::input::{self, Key, KeyEvent, MouseEvent, MouseKind};
+use newt_core::metadata::{AgentState, SessionMetadata};
 use newt_core::snapshot::{cursor_shape, flags, Cell, Cursor, DamagedRow};
 use newt_core::{
     SelectionMode, Session as CoreSession, SessionConfig, SizeInCells, Snapshot as CoreSnapshot,
@@ -101,6 +102,15 @@ pub const NEWT_SELECTION_BLOCK: u8 = 1;
 pub const NEWT_SELECTION_WORD: u8 = 2;
 /// Whole lines, as a triple-click gives.
 pub const NEWT_SELECTION_LINE: u8 = 3;
+
+// What an agent driving a session is doing. `UNKNOWN` is deliberately distinct
+// from `IDLE`: "no agent has reported" and "an agent is idle" are different
+// things to show.
+pub const NEWT_AGENT_UNKNOWN: u8 = 0;
+pub const NEWT_AGENT_IDLE: u8 = 1;
+pub const NEWT_AGENT_RUNNING: u8 = 2;
+pub const NEWT_AGENT_WAITING: u8 = 3;
+pub const NEWT_AGENT_ERROR: u8 = 4;
 
 const _: () = {
     assert!(NEWT_FLAG_BOLD == flags::BOLD);
@@ -200,6 +210,25 @@ pub struct NewtSession {
     title: Option<CString>,
     /// Likewise for selected text.
     selection: Option<CString>,
+    /// Likewise for the model name in metadata.
+    model: Option<CString>,
+}
+
+/// Per-session bookkeeping for the UI.
+///
+/// Present for the end goal — token, cost, and agent-state display alongside
+/// the grid. Nothing here affects what is drawn.
+#[repr(C)]
+pub struct NewtSessionMetadata {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    /// Cost in millionths of a currency unit; an integer so long sessions do
+    /// not accumulate floating-point drift.
+    pub cost_micros: u64,
+    /// One of the `NEWT_AGENT_*` values.
+    pub agent_state: u8,
+    /// Model name, or null. Valid until the next metadata call on this session.
+    pub model: *const c_char,
 }
 
 /// Borrowed view of one frame. See the module docs for lifetimes.
@@ -298,6 +327,7 @@ pub unsafe extern "C" fn newt_session_new(
                 snapshot: CoreSnapshot::default(),
                 title: None,
                 selection: None,
+                model: None,
             })),
             Err(e) => {
                 set_last_error(e.to_string());
@@ -619,6 +649,90 @@ pub unsafe extern "C" fn newt_session_send_paste(
             set_last_error(message);
             false
         }
+    })
+}
+
+/// Read a session's metadata.
+///
+/// `model` in the result borrows session-owned memory and is valid until the
+/// next call to this function on the same session.
+///
+/// # Safety
+///
+/// `handle` must be live and `out` must point to a writable struct.
+#[no_mangle]
+pub unsafe extern "C" fn newt_session_metadata(
+    handle: *mut NewtSession,
+    out: *mut NewtSessionMetadata,
+) -> bool {
+    with_session(handle, |session| {
+        if out.is_null() {
+            set_last_error("metadata called with a null output pointer");
+            return false;
+        }
+
+        let metadata = session.session.metadata();
+        session.model = metadata
+            .model
+            .as_ref()
+            .and_then(|model| CString::new(model.as_str()).ok());
+
+        out.write(NewtSessionMetadata {
+            input_tokens: metadata.input_tokens,
+            output_tokens: metadata.output_tokens,
+            cost_micros: metadata.cost_micros,
+            agent_state: metadata.agent_state.as_u8(),
+            model: session
+                .model
+                .as_ref()
+                .map_or(std::ptr::null(), |model| model.as_ptr()),
+        });
+        true
+    })
+}
+
+/// Replace a session's metadata.
+///
+/// # Safety
+///
+/// `handle` must be live; `model` may be null, otherwise it must point to
+/// `model_len` bytes of UTF-8.
+#[no_mangle]
+pub unsafe extern "C" fn newt_session_set_metadata(
+    handle: *mut NewtSession,
+    input_tokens: u64,
+    output_tokens: u64,
+    cost_micros: u64,
+    agent_state: u8,
+    model: *const u8,
+    model_len: usize,
+) -> bool {
+    with_session(handle, |session| {
+        let Some(agent_state) = AgentState::from_u8(agent_state) else {
+            set_last_error("unknown agent state");
+            return false;
+        };
+
+        let model = if model.is_null() {
+            None
+        } else {
+            match borrow_str(model, model_len) {
+                Ok(model) => Some(model.to_string()),
+                Err(message) => {
+                    set_last_error(message);
+                    return false;
+                }
+            }
+        };
+
+        session.session.set_metadata(SessionMetadata {
+            input_tokens,
+            output_tokens,
+            cost_micros,
+            agent_state,
+            model,
+        });
+        true
     })
 }
 

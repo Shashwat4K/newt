@@ -30,12 +30,18 @@ protocol TerminalInputDelegate: AnyObject {
     func terminalView(_ view: TerminalView, updateSelection col: UInt16, row: UInt16, sideRight: Bool)
     func terminalViewSelectedText(_ view: TerminalView) -> String?
     func terminalViewScrollToBottom(_ view: TerminalView)
+    func terminalViewDidBecomeFocused(_ view: TerminalView)
 }
 
 extension TerminalView {
     override var acceptsFirstResponder: Bool { true }
 
-    override func becomeFirstResponder() -> Bool { true }
+    override func becomeFirstResponder() -> Bool {
+        // Focus decides which pane receives keystrokes and which one the
+        // window's commands act on, so the pane needs to know it moved.
+        inputDelegate?.terminalViewDidBecomeFocused(self)
+        return true
+    }
 
     // MARK: - Keyboard
 

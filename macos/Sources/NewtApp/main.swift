@@ -37,6 +37,21 @@ if let flag = arguments.firstIndex(of: "--render-to"), flag + 1 < arguments.coun
         find = arguments[findFlag + 1]
     }
     application.setActivationPolicy(.prohibited)
+
+    // --panes N renders a split window instead of a single grid.
+    if let panesFlag = arguments.firstIndex(of: "--panes"),
+        panesFlag + 1 < arguments.count,
+        let panes = Int(arguments[panesFlag + 1])
+    {
+        do {
+            try OfflineRender.runSplit(panes: panes, outputPath: path, fontSize: 13)
+            exit(0)
+        } catch {
+            FileHandle.standardError.write(Data("newt: \(error)\n".utf8))
+            exit(1)
+        }
+    }
+
     do {
         try OfflineRender.run(
             command: command,

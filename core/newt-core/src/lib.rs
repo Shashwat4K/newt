@@ -18,6 +18,7 @@ pub mod emulator;
 pub mod error;
 pub mod events;
 pub mod input;
+pub mod metadata;
 pub mod palette;
 pub mod session;
 pub mod snapshot;
@@ -26,6 +27,7 @@ pub use emulator::{Emulator, SelectionMode, SizeInCells, DEFAULT_SCROLLBACK_LINE
 pub use error::{Error, Result};
 pub use events::EventSink;
 pub use input::{InputModes, Key, KeyEvent, MouseEvent, MouseKind};
+pub use metadata::{AgentState, SessionMetadata};
 pub use palette::Rgb;
 pub use session::{Direction, Session, SessionConfig, Trace};
 pub use snapshot::{Cell, Color, Cursor, DamagedRow, Snapshot};

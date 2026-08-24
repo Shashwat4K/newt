@@ -2,124 +2,254 @@ import AppKit
 import Foundation
 import NewtKit
 
-/// Owns one window, its view, and the session behind it.
+/// One window: a tree of split panes, plus the find bar.
 ///
-/// The session runs on its own thread inside the core; this class only samples
-/// it. Sampling on the display link means the UI redraws at the screen's pace
-/// no matter how fast the child floods the PTY — a `cat` of a large file
-/// cannot outrun the renderer.
+/// Panes are composed with `NSSplitView` rather than a hand-rolled layout tree —
+/// the split view already handles dividers, dragging, and proportional resizing,
+/// and its subview hierarchy *is* the tree.
 @MainActor
-final class TerminalWindowController: NSObject, NSWindowDelegate {
-    let window: NSWindow
-    let view: TerminalView
-    let session: TerminalSession
-    private var displayLink: CADisplayLink?
-    private var lastTitle: String?
-    private var lastReportedSize: TerminalSize
+final class TerminalWindowController: NSWindowController, NSWindowDelegate {
+    /// Kept as a non-optional alongside `NSWindowController.window`, which is
+    /// optional and would need unwrapping at every use.
+    let hostWindow: NSWindow
+
+    private let font: TerminalFont
+    /// Holds the pane tree. The find bar floats above it.
+    private let paneContainer = NSView()
     private let findBar = FindBar()
 
-    init(cols: UInt16, rows: UInt16, fontSize: CGFloat) throws {
-        let font = TerminalFont(size: fontSize)
-        let initialSize = TerminalSize(cols: cols, rows: rows)
-        session = try TerminalSession(size: initialSize)
-        view = TerminalView(font: font, cols: Int(cols), rows: Int(rows))
-        lastReportedSize = initialSize
+    private(set) var panes: [TerminalPaneController] = []
+    private(set) var focusedPane: TerminalPaneController?
 
-        window = NSWindow(
-            contentRect: view.frame,
+    /// Grid size used for panes created after the first.
+    private let defaultSize: TerminalSize
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("newt does not use storyboards")
+    }
+
+    init(font: TerminalFont, cols: UInt16, rows: UInt16) throws {
+        self.font = font
+        defaultSize = TerminalSize(cols: cols, rows: rows)
+
+        let first = try TerminalPaneController(font: font, cols: cols, rows: rows)
+        let contentRect = NSRect(origin: .zero, size: font.geometry.pixelSize(for: defaultSize))
+
+        hostWindow = NSWindow(
+            contentRect: contentRect,
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
-        window.title = "newt"
+        hostWindow.title = "newt"
+        hostWindow.contentMinSize = font.geometry.pixelSize(for: TerminalSize(cols: 20, rows: 5))
+        // Opting into native window tabbing gives ⌘T, the tab bar, and tab
+        // switching for free, rather than reimplementing all of it.
+        hostWindow.tabbingMode = .preferred
+        hostWindow.tabbingIdentifier = "newt.terminal"
 
-        // The terminal fills the window; the find bar floats over its top-right
-        // corner so opening it does not change the grid size.
-        let container = NSView(frame: view.frame)
-        view.autoresizingMask = [.width, .height]
-        container.addSubview(view)
+        let container = NSView(frame: contentRect)
+        paneContainer.frame = contentRect
+        paneContainer.autoresizingMask = [.width, .height]
+        container.addSubview(paneContainer)
+
+        first.view.frame = paneContainer.bounds
+        first.view.autoresizingMask = [.width, .height]
+        paneContainer.addSubview(first.view)
 
         findBar.isHidden = true
         findBar.autoresizingMask = [.minXMargin, .minYMargin]
         findBar.setFrameOrigin(
-            NSPoint(x: view.frame.maxX - findBar.frame.width - 12, y: view.frame.maxY - findBar.frame.height - 12)
+            NSPoint(
+                x: contentRect.maxX - findBar.frame.width - 12,
+                y: contentRect.maxY - findBar.frame.height - 12
+            )
         )
         container.addSubview(findBar)
 
-        window.contentView = container
-        window.center()
-        window.isReleasedWhenClosed = false
+        hostWindow.contentView = container
 
-        super.init()
-        window.delegate = self
-        view.inputDelegate = self
+        // NSWindowController puts this object in the responder chain, which is
+        // how menu commands like Split Right reach it.
+        super.init(window: hostWindow)
+
+        hostWindow.delegate = self
+        adopt(first)
+        focusedPane = first
 
         findBar.onFind = { [weak self] query, forward in
-            guard let self else { return false }
+            guard let self, let pane = self.focusedPane else { return false }
             do {
-                return try self.session.find(query, forward: forward)
+                return try pane.session.find(query, forward: forward)
             } catch {
-                self.report(error)
+                pane.report(error)
                 return false
             }
         }
         findBar.onClose = { [weak self] in
-            guard let self else { return }
-            self.window.makeFirstResponder(self.view)
+            guard let self, let pane = self.focusedPane else { return }
+            self.hostWindow.makeFirstResponder(pane.view)
         }
-
-        // A window smaller than this cannot show anything useful, and letting
-        // it shrink further just produces degenerate grids.
-        window.contentMinSize = view.pixelSize(for: TerminalSize(cols: 20, rows: 5))
-
-        // Report real cell metrics so the terminal can answer pixel-size
-        // queries from full-screen programs.
-        session.setCellSize(
-            width: UInt16(font.cellWidth.rounded()),
-            height: UInt16(font.cellHeight.rounded())
-        )
     }
 
-    /// Show the window and begin sampling the session.
-    func start(runningCommand command: String?) {
-        window.makeKeyAndOrderFront(nil)
-        // Keystrokes reach the terminal only while the view holds focus.
-        window.makeFirstResponder(view)
-
-        let link = view.displayLink(target: self, selector: #selector(tick))
-        link.add(to: .main, forMode: .common)
-        displayLink = link
-
-        if let command {
-            // No input path yet (Phase 4), so a command can only be injected
-            // here — enough to prove live output reaches the window.
-            try? session.write("\(command)\n")
+    /// Show the window and start every pane.
+    func start(runningCommand command: String? = nil) {
+        hostWindow.makeKeyAndOrderFront(nil)
+        for pane in panes {
+            pane.start()
+        }
+        if let pane = focusedPane {
+            hostWindow.makeFirstResponder(pane.view)
+            if let command {
+                try? pane.session.write("\(command)\n")
+            }
         }
     }
 
     func stop() {
-        displayLink?.invalidate()
-        displayLink = nil
+        for pane in panes {
+            pane.stop()
+        }
     }
 
-    @objc private func tick(_ link: CADisplayLink) {
+    // MARK: - Panes
+
+    private func adopt(_ pane: TerminalPaneController) {
+        panes.append(pane)
+        pane.onFocus = { [weak self] pane in self?.focusedPane = pane }
+        pane.onExit = { [weak self] pane in self?.close(pane) }
+        pane.onTitleChange = { [weak self] pane, title in
+            // Only the focused pane names the window; otherwise a background
+            // pane's title would fight the one you are looking at.
+            guard let self, self.focusedPane === pane else { return }
+            self.hostWindow.title = title
+        }
+    }
+
+    @objc func splitVertically(_ sender: Any?) {
+        split(vertical: true)
+    }
+
+    @objc func splitHorizontally(_ sender: Any?) {
+        split(vertical: false)
+    }
+
+    /// Replace the focused pane with a split holding it and a new pane.
+    ///
+    /// - Parameter vertical: true puts the panes side by side.
+    private func split(vertical: Bool) {
+        guard let focused = focusedPane, let superview = focused.view.superview else { return }
+
+        let newPane: TerminalPaneController
         do {
-            try session.withSnapshot { snapshot in
-                view.apply(snapshot)
-            }
+            newPane = try TerminalPaneController(
+                font: font,
+                cols: defaultSize.cols,
+                rows: defaultSize.rows
+            )
         } catch {
-            stop()
+            reportPaneFailure(error)
             return
         }
 
-        if let title = session.title, title != lastTitle {
-            lastTitle = title
-            window.title = title
+        let splitView = NSSplitView(frame: focused.view.frame)
+        splitView.isVertical = vertical
+        splitView.dividerStyle = .thin
+        splitView.autoresizingMask = focused.view.autoresizingMask
+
+        // Put the split view exactly where the focused pane was, whether that
+        // was directly in the container or inside another split.
+        if let parent = superview as? NSSplitView {
+            let index = parent.arrangedSubviews.firstIndex(of: focused.view) ?? 0
+            focused.view.removeFromSuperview()
+            parent.insertArrangedSubview(splitView, at: index)
+        } else {
+            focused.view.removeFromSuperview()
+            superview.addSubview(splitView)
         }
 
-        if session.hasExited {
-            stop()
+        focused.view.autoresizingMask = [.width, .height]
+        newPane.view.autoresizingMask = [.width, .height]
+        splitView.addArrangedSubview(focused.view)
+        splitView.addArrangedSubview(newPane.view)
+        splitView.adjustSubviews()
+
+        adopt(newPane)
+        newPane.start()
+        keepFindBarOnTop()
+
+        hostWindow.makeFirstResponder(newPane.view)
+    }
+
+    @objc func closeFocusedPane(_ sender: Any?) {
+        guard let focused = focusedPane else { return }
+        close(focused)
+    }
+
+    /// Remove a pane, collapsing any split left with a single child.
+    private func close(_ pane: TerminalPaneController) {
+        guard let index = panes.firstIndex(where: { $0 === pane }) else { return }
+
+        pane.stop()
+        panes.remove(at: index)
+
+        let superview = pane.view.superview
+        pane.view.removeFromSuperview()
+
+        // A split with one child left is no longer a split; collapsing it keeps
+        // the tree from filling with single-child dividers.
+        if let split = superview as? NSSplitView, split.arrangedSubviews.count == 1 {
+            let survivor = split.arrangedSubviews[0]
+            let frame = split.frame
+            let mask = split.autoresizingMask
+            let parent = split.superview
+
+            survivor.removeFromSuperview()
+            split.removeFromSuperview()
+
+            survivor.frame = frame
+            survivor.autoresizingMask = mask
+            if let parentSplit = parent as? NSSplitView {
+                parentSplit.addArrangedSubview(survivor)
+                parentSplit.adjustSubviews()
+            } else {
+                parent?.addSubview(survivor)
+            }
         }
+
+        keepFindBarOnTop()
+
+        if panes.isEmpty {
+            hostWindow.close()
+            return
+        }
+
+        focusedPane = panes.last
+        if let next = focusedPane {
+            hostWindow.makeFirstResponder(next.view)
+        }
+    }
+
+    @objc func focusNextPane(_ sender: Any?) {
+        cycleFocus(by: 1)
+    }
+
+    @objc func focusPreviousPane(_ sender: Any?) {
+        cycleFocus(by: -1)
+    }
+
+    private func cycleFocus(by offset: Int) {
+        guard !panes.isEmpty else { return }
+        let current = panes.firstIndex(where: { $0 === focusedPane }) ?? 0
+        let next = (current + offset + panes.count) % panes.count
+        hostWindow.makeFirstResponder(panes[next].view)
+    }
+
+    /// The find bar must stay above the pane tree after any change to it.
+    private func keepFindBarOnTop() {
+        findBar.removeFromSuperview()
+        hostWindow.contentView?.addSubview(findBar, positioned: .above, relativeTo: nil)
     }
 
     // MARK: - Find
@@ -136,13 +266,15 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
         findBar.repeatSearch(forward: false)
     }
 
-    // MARK: - Resizing
+    // MARK: - Window
 
-    /// Snap the window to whole cells while it is being dragged.
+    /// Snap the window to whole cells, but only when a single pane fills it.
     ///
-    /// Without this the content view keeps a partial row or column that can
-    /// never be drawn into, which reads as an uneven margin along one edge.
+    /// With splits there is no single grid to snap to — dividers and rounding
+    /// mean the panes cannot all land on cell boundaries at once.
     func windowWillResize(_ sender: NSWindow, to frameSize: NSSize) -> NSSize {
+        guard panes.count == 1 else { return frameSize }
+
         let currentFrame = sender.frame
         let currentContent = sender.contentRect(forFrameRect: currentFrame).size
         let chrome = NSSize(
@@ -154,122 +286,26 @@ final class TerminalWindowController: NSObject, NSWindowDelegate {
             width: frameSize.width - chrome.width,
             height: frameSize.height - chrome.height
         )
-        let snapped = view.pixelSize(for: view.gridSize(fitting: proposedContent))
+        let snapped = font.geometry.pixelSize(for: font.geometry.gridSize(fitting: proposedContent))
 
-        return NSSize(
-            width: snapped.width + chrome.width,
-            height: snapped.height + chrome.height
-        )
+        return NSSize(width: snapped.width + chrome.width, height: snapped.height + chrome.height)
     }
 
     func windowDidResize(_ notification: Notification) {
-        resizeSessionToFitView()
-    }
-
-    /// Tell the core about a new grid size, but only when it actually changed.
-    ///
-    /// Resizing is a reflow of the whole scrollback and delivers SIGWINCH to
-    /// the child; doing that on every pixel of a drag would be wasteful and
-    /// would make programs redraw constantly.
-    private func resizeSessionToFitView() {
-        let grid = view.gridSize(fitting: view.bounds.size)
-        guard grid != lastReportedSize else { return }
-        lastReportedSize = grid
-
-        do {
-            try session.resize(to: grid)
-        } catch {
-            report(error)
+        for pane in panes {
+            pane.synchronizeSize()
         }
-    }
-
-    // MARK: - Input
-
-    /// Input is forwarded verbatim; the core decides what bytes each event
-    /// produces, because that depends on terminal modes it alone tracks.
-    private func report(_ error: Error) {
-        FileHandle.standardError.write(Data("newt: \(error)\n".utf8))
     }
 
     func windowWillClose(_ notification: Notification) {
         stop()
-        NSApp.terminate(nil)
-    }
-}
-
-
-extension TerminalWindowController: TerminalInputDelegate {
-    func terminalView(_ view: TerminalView, send key: TerminalKey, modifiers: KeyModifiers) {
-        do { try session.send(key: key, modifiers: modifiers) } catch { report(error) }
     }
 
-    func terminalView(_ view: TerminalView, sendText text: String) {
-        do { try session.send(text: text) } catch { report(error) }
-    }
-
-    @discardableResult
-    func terminalView(
-        _ view: TerminalView,
-        sendMouse kind: MouseEventKind,
-        button: MouseButton,
-        col: UInt16,
-        row: UInt16,
-        modifiers: KeyModifiers
-    ) -> Bool {
-        do {
-            return try session.send(
-                mouse: kind,
-                button: button,
-                col: col,
-                row: row,
-                modifiers: modifiers
-            )
-        } catch {
-            report(error)
-            return false
-        }
-    }
-
-    func terminalView(_ view: TerminalView, scrollByLines lines: Int32) {
-        session.scroll(by: lines)
-    }
-
-    func terminalView(_ view: TerminalView, paste text: String) {
-        do { try session.paste(text) } catch { report(error) }
-    }
-
-    func terminalView(
-        _ view: TerminalView,
-        startSelection col: UInt16,
-        row: UInt16,
-        sideRight: Bool,
-        mode: SelectionMode
-    ) {
-        do {
-            try session.startSelection(col: col, row: row, sideRight: sideRight, mode: mode)
-        } catch {
-            report(error)
-        }
-    }
-
-    func terminalView(
-        _ view: TerminalView,
-        updateSelection col: UInt16,
-        row: UInt16,
-        sideRight: Bool
-    ) {
-        do {
-            try session.updateSelection(col: col, row: row, sideRight: sideRight)
-        } catch {
-            report(error)
-        }
-    }
-
-    func terminalViewSelectedText(_ view: TerminalView) -> String? {
-        session.selectedText
-    }
-
-    func terminalViewScrollToBottom(_ view: TerminalView) {
-        session.scrollToBottom()
+    private func reportPaneFailure(_ error: Error) {
+        let alert = NSAlert()
+        alert.messageText = "newt could not start a terminal session"
+        alert.informativeText = String(describing: error)
+        alert.alertStyle = .warning
+        alert.runModal()
     }
 }

@@ -15,6 +15,7 @@ use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize}
 use crate::emulator::{Emulator, SelectionMode, SizeInCells, DEFAULT_SCROLLBACK_LINES};
 use crate::error::{Error, Result};
 use crate::input::{encode_key, encode_mouse, encode_paste, encode_text, KeyEvent, MouseEvent};
+use crate::metadata::SessionMetadata;
 
 /// The PTY write end, shared with the reader thread so the terminal's replies
 /// to queries can be sent without a round trip through the shell.
@@ -79,6 +80,8 @@ pub struct Session {
     reader: Option<JoinHandle<()>>,
     child_exited: Arc<AtomicBool>,
     trace: Option<SharedTrace>,
+    /// Bookkeeping for the UI. Not terminal state — nothing here is drawn.
+    metadata: Mutex<SessionMetadata>,
 }
 
 impl Session {
@@ -141,6 +144,7 @@ impl Session {
             reader: Some(reader),
             child_exited,
             trace,
+            metadata: Mutex::new(SessionMetadata::default()),
         })
     }
 
@@ -207,6 +211,21 @@ impl Session {
             encode_paste(text, emulator.modes())
         });
         self.write(&bytes)
+    }
+
+    // --- metadata ---
+
+    /// A copy of this session's metadata.
+    pub fn metadata(&self) -> SessionMetadata {
+        self.metadata
+            .lock()
+            .expect("metadata mutex poisoned")
+            .clone()
+    }
+
+    /// Replace this session's metadata.
+    pub fn set_metadata(&self, metadata: SessionMetadata) {
+        *self.metadata.lock().expect("metadata mutex poisoned") = metadata;
     }
 
     // --- selection and search ---

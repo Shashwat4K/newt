@@ -107,6 +107,57 @@ enum OfflineRender {
         }
     }
 
+    /// Build a window, split it, and draw the whole pane tree to a PNG.
+    ///
+    /// Verifies the split layout without a display: panes, dividers, and each
+    /// pane's independently sized grid all go through the same code the real
+    /// window uses.
+    static func runSplit(panes: Int, outputPath: String, fontSize: CGFloat) throws {
+        let font = TerminalFont(size: fontSize)
+        let controller = try TerminalWindowController(font: font, cols: 80, rows: 24)
+        controller.start()
+
+        for index in 0..<max(0, panes - 1) {
+            // Alternate direction so the result is a tree, not a single row.
+            if index % 2 == 0 {
+                controller.splitVertically(nil)
+            } else {
+                controller.splitHorizontally(nil)
+            }
+        }
+
+        // Let each shell draw its prompt before capturing.
+        let deadline = Date().addingTimeInterval(6)
+        while Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+            let ready = controller.panes.allSatisfy { pane in
+                ((try? pane.session.withSnapshot { !$0.text().isEmpty }) ?? false)
+            }
+            if ready { break }
+        }
+
+        guard let content = controller.hostWindow.contentView else {
+            throw RenderError.couldNotAllocateBitmap
+        }
+        guard let bitmap = content.bitmapImageRepForCachingDisplay(in: content.bounds) else {
+            throw RenderError.couldNotAllocateBitmap
+        }
+        content.cacheDisplay(in: content.bounds, to: bitmap)
+
+        guard let png = bitmap.representation(using: .png, properties: [:]) else {
+            throw RenderError.couldNotEncodePNG
+        }
+        try png.write(to: URL(fileURLWithPath: outputPath))
+
+        let sizes = controller.panes.map { pane in
+            let size = (try? pane.session.withSnapshot { ($0.cols, $0.rows) }) ?? (0, 0)
+            return "\(size.0)x\(size.1)"
+        }
+        FileHandle.standardError.write(
+            Data("wrote \(outputPath): \(controller.panes.count) panes \(sizes)\n".utf8)
+        )
+    }
+
     enum RenderError: Error {
         case couldNotAllocateBitmap
         case couldNotEncodePNG
