@@ -10,15 +10,15 @@ It is built so Linux and Windows ports are later work rather than rewrites: ever
 
 ## Status
 
-Early. The core runs real shells correctly and is exercised from Swift through the C ABI, but there is **no window yet** — the app target is a headless demo.
+Early but visible: `newt` now opens a window and renders live shell output. There is **no input yet** — Phase 4 — so it displays a session rather than lets you use one.
 
 | Phase | | |
 |---|---|---|
 | 0 | Scaffolding, build pipeline | done |
 | 1 | Terminal core: PTY, emulation, scrollback | done |
 | 2 | C ABI and grid snapshots | done |
-| 3 | Window and CoreText renderer | next |
-| 4 | Input encoding | |
+| 3 | Window and CoreText renderer | done |
+| 4 | Input encoding | next |
 | 5 | Resize and reflow | |
 | 6 | Scrollback, selection, find | |
 | 7 | Tabs, splits, windows | |
@@ -50,17 +50,30 @@ Cargo must run before SwiftPM — the Swift target links the core's static libra
 
 ## Running
 
-No window yet. Both binaries run a shell headlessly and print the resulting grid:
+```sh
+./macos/.build/debug/NewtApp                 # a window running your login shell
+./macos/.build/debug/NewtApp "ls -la"        # ...with a command run at startup
+```
+
+The window is output-only until Phase 4, so a command can only be injected at startup.
+
+Draw one frame to a PNG without opening a window — useful for checking the renderer unattended, and the fastest way to see what a frame actually looks like:
+
+```sh
+./macos/.build/debug/NewtApp --render-to /tmp/frame.png "printf '\033[1;31mred\033[0m'"
+```
+
+The core can also be driven with no UI at all:
 
 ```sh
 cargo run --manifest-path core/Cargo.toml -p newt-cli -- "echo hello"
 cargo run --manifest-path core/Cargo.toml -p newt-cli -- --cols 100 --rows 30 --settle 1500 "vim /etc/hosts"
 cargo run --manifest-path core/Cargo.toml -p newt-cli -- --trace "echo hi"   # raw PTY traffic
-
-./macos/.build/debug/NewtApp "uname -sm"                                     # same, through the ABI
 ```
 
 `--trace` dumps the byte stream in both directions. Terminal bugs are usually invisible in the rendered grid, so this is the first tool to reach for.
+
+A Nerd Font is preferred when one is installed (`MesloLGS NF` and friends), since prompt themes lean on Private Use Area icons that SF Mono and Menlo have no glyphs for.
 
 ## Testing
 

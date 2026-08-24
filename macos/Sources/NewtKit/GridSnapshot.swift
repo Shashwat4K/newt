@@ -41,22 +41,13 @@ public struct GridSnapshot {
     /// marks held in the side table. Returns nil for spacers and empty cells,
     /// which must not be drawn.
     public func character(at cell: NewtCell) -> Character? {
-        guard cell.codepoint != 0, let scalar = Unicode.Scalar(cell.codepoint) else { return nil }
-
         let start = Int(cell.combining_offset)
         let count = Int(cell.combining_len)
-        guard count > 0 else { return Character(scalar) }
-
-        var view = String.UnicodeScalarView()
-        view.append(scalar)
-        for index in start..<(start + count) where index < combining.count {
-            if let mark = Unicode.Scalar(combining[index]) {
-                view.append(mark)
-            }
-        }
-        // A cluster can still decompose into several characters if the marks do
-        // not combine; the first is the one anchored to this cell.
-        return String(view).first
+        let marks: [UInt32] =
+            count > 0 && start + count <= combining.count
+            ? Array(combining[start..<(start + count)])
+            : []
+        return assembleCharacter(codepoint: cell.codepoint, marks: marks)
     }
 
     /// One row rendered as text, trailing blanks trimmed. For tests and

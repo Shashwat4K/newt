@@ -1,67 +1,42 @@
+import AppKit
 import Foundation
-import NewtKit
 
-// Phase 2 stub: proves the shell can drive a real session through the C ABI and
-// read the grid back. Phase 3 replaces this with an NSApplication, a window,
-// and the CoreText renderer; the session code below stays as it is.
+// Phase 3: a window showing live shell output. Output-only — the input path
+// arrives in Phase 4, so an optional argument is written into the session at
+// startup to demonstrate that output reaches the screen.
+//
+//     NewtApp                       # just the shell prompt
+//     NewtApp "ls -la"              # run a command at startup
 
-let size = TerminalSize(cols: 80, rows: 20)
+let application = NSApplication.shared
+// Without a bundle there is no Info.plist to say this is a GUI app, so the
+// activation policy has to be set explicitly or the window never focuses.
+application.setActivationPolicy(.regular)
 
-do {
-    let session = try TerminalSession(size: size)
-    let command = CommandLine.arguments.dropFirst().first ?? "echo newt is alive"
+let arguments = Array(CommandLine.arguments.dropFirst())
 
-    // Wait for the prompt before typing at it: a heavy shell startup can take
-    // seconds to emit its first byte.
-    try waitForOutput(session)
-    try session.write("\(command)\n")
-    try settle(session)
-
-    try session.withSnapshot { snapshot in
-        print(snapshot.text())
-        FileHandle.standardError.write(Data("""
-
-        [\(snapshot.cols)x\(snapshot.rows) \
-        cursor \(snapshot.cursor.col),\(snapshot.cursor.row) \
-        history \(snapshot.historyLength) \
-        core \(Core.version)]
-
-        """.utf8))
-    }
-} catch {
-    FileHandle.standardError.write(Data("newt: \(error)\n".utf8))
-    exit(1)
-}
-
-/// Block until the screen produces anything, so an empty grid is not mistaken
-/// for a settled one.
-func waitForOutput(_ session: TerminalSession, timeout: TimeInterval = 10) throws {
-    let deadline = Date().addingTimeInterval(timeout)
-    while Date() < deadline {
-        Thread.sleep(forTimeInterval: 0.02)
-        let hasOutput = try session.withSnapshot { !$0.text().isEmpty }
-        if hasOutput { return }
+// Offscreen mode: draw one frame to a PNG and exit, without a window.
+if let flag = arguments.firstIndex(of: "--render-to"), flag + 1 < arguments.count {
+    let path = arguments[flag + 1]
+    let command = arguments.count > flag + 2 ? arguments[flag + 2] : nil
+    application.setActivationPolicy(.prohibited)
+    do {
+        try OfflineRender.run(
+            command: command,
+            outputPath: path,
+            cols: 100,
+            rows: 30,
+            fontSize: 13
+        )
+        exit(0)
+    } catch {
+        FileHandle.standardError.write(Data("newt: \(error)\n".utf8))
+        exit(1)
     }
 }
 
-/// Block until the screen stops changing.
-func settle(
-    _ session: TerminalSession,
-    quietPeriod: TimeInterval = 0.3,
-    timeout: TimeInterval = 10
-) throws {
-    let deadline = Date().addingTimeInterval(timeout)
-    var last = try session.withSnapshot { $0.text() }
-    var unchangedSince = Date()
+let delegate = AppDelegate()
+delegate.initialCommand = arguments.first
+application.delegate = delegate
 
-    while Date() < deadline {
-        Thread.sleep(forTimeInterval: 0.02)
-        let current = try session.withSnapshot { $0.text() }
-        if current != last {
-            last = current
-            unchangedSince = Date()
-        } else if Date().timeIntervalSince(unchangedSince) >= quietPeriod {
-            return
-        }
-    }
-}
+application.run()
