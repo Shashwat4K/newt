@@ -10,6 +10,19 @@ import NewtKit
 /// without a display, a screenshot, or accessibility permissions.
 @MainActor
 enum OfflineRender {
+    /// Shell the verification paths run unless told otherwise.
+    ///
+    /// Deliberately not the user's login shell. A check that spawns `$SHELL`
+    /// inherits whatever is in that user's dotfiles — oh-my-zsh, a prompt
+    /// theme that redraws itself a second after starting, a plugin that clears
+    /// the screen — and then the harness is really testing the dotfiles. It
+    /// made the settle logic here chase powerlevel10k's instant prompt, which
+    /// is not a property of newt at all. `/bin/sh` prints one prompt and stops.
+    ///
+    /// Pass `--login-shell` to use the real one when the point *is* real-world
+    /// rendering: Nerd Font glyphs, powerline separators, a themed prompt.
+    static let verificationShell = "/bin/sh"
+
     static func run(
         command: String?,
         typed: [String] = [],
@@ -17,10 +30,11 @@ enum OfflineRender {
         outputPath: String,
         cols: UInt16,
         rows: UInt16,
-        fontSize: CGFloat
+        fontSize: CGFloat,
+        shell: String? = verificationShell
     ) throws {
         let font = TerminalFont(size: fontSize)
-        let session = try TerminalSession(size: TerminalSize(cols: cols, rows: rows))
+        let session = try TerminalSession(size: TerminalSize(cols: cols, rows: rows), shell: shell)
         session.setCellSize(
             width: UInt16(font.cellWidth.rounded()),
             height: UInt16(font.cellHeight.rounded())
@@ -112,9 +126,20 @@ enum OfflineRender {
     /// Verifies the split layout without a display: panes, dividers, and each
     /// pane's independently sized grid all go through the same code the real
     /// window uses.
-    static func runSplit(panes: Int, tabs: Int, outputPath: String, fontSize: CGFloat) throws {
+    static func runSplit(
+        panes: Int,
+        tabs: Int,
+        outputPath: String,
+        fontSize: CGFloat,
+        shell: String? = verificationShell
+    ) throws {
         let font = TerminalFont(size: fontSize)
-        let controller = try TerminalWindowController(font: font, cols: 80, rows: 24)
+        let controller = try TerminalWindowController(
+            font: font,
+            cols: 80,
+            rows: 24,
+            shell: shell
+        )
         controller.start()
 
         // Extra tabs first, so the split below lands in the tab left selected.
@@ -141,31 +166,26 @@ enum OfflineRender {
             if ready { break }
         }
 
-        // Then wait for the screen to stop changing — but not too eagerly.
+        // Then wait for the screen to stop changing. First output is not a
+        // finished prompt: splitting resizes every pane, which makes the shell
+        // redraw, and capturing mid-redraw yields the blank panes this exists
+        // to prevent.
         //
-        // Two things make a pane look settled when it is not. Splitting resizes
-        // every pane, so the shell redraws. And powerlevel10k draws an *instant
-        // prompt* first and replaces it with the real one a second or two
-        // later, which means the screen goes quiet twice, and the first quiet
-        // period is the wrong one to photograph. Phases 0–1 hit the same class
-        // of bug from the other side, where "no output yet" read as "settled".
-        //
-        // Hence a floor on elapsed time as well as a quiet period.
-        let start = Date()
-        let minimumWait: TimeInterval = 2.5
-        let quietPeriod: TimeInterval = 1.2
+        // The quiet period is short because `verificationShell` prints one
+        // prompt and stops. Against a themed login shell it would need to be
+        // long enough to outwait a second draw — which is exactly the
+        // dotfile-specific tuning that spawning a known shell removes.
+        let quietPeriod: TimeInterval = shell == nil ? 1.5 : 0.4
         var last = paneText(controller)
         var unchangedSince = Date()
-        let settleDeadline = start.addingTimeInterval(10)
+        let settleDeadline = Date().addingTimeInterval(10)
         while Date() < settleDeadline {
             RunLoop.main.run(until: Date().addingTimeInterval(0.05))
             let current = paneText(controller)
             if current != last {
                 last = current
                 unchangedSince = Date()
-            } else if Date().timeIntervalSince(unchangedSince) >= quietPeriod,
-                Date().timeIntervalSince(start) >= minimumWait
-            {
+            } else if Date().timeIntervalSince(unchangedSince) >= quietPeriod {
                 break
             }
         }
@@ -222,10 +242,17 @@ enum OfflineRender {
     /// afford. Checked rather than assumed, and cheap to keep checking.
     ///
     /// - Returns: true if the backgrounded tab produced its output.
-    static func runBackgroundCheck(fontSize: CGFloat) throws -> Bool {
+    static func runBackgroundCheck(fontSize: CGFloat, shell: String? = verificationShell) throws
+        -> Bool
+    {
         let marker = "BACKGROUND_OK"
         let font = TerminalFont(size: fontSize)
-        let controller = try TerminalWindowController(font: font, cols: 80, rows: 24)
+        let controller = try TerminalWindowController(
+            font: font,
+            cols: 80,
+            rows: 24,
+            shell: shell
+        )
         controller.start()
 
         guard let first = controller.selectedTab, let pane = first.focusedPane else { return false }

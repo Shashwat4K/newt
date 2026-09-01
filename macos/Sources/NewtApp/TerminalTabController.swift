@@ -23,6 +23,8 @@ final class TerminalTabController: NSObject {
 
     private let font: TerminalFont
     private let defaultSize: TerminalSize
+    /// Program every pane in this tab runs. `nil` is the login shell.
+    private let shell: String?
 
     private(set) var panes: [TerminalPaneController] = []
     private(set) var focusedPane: TerminalPaneController?
@@ -37,15 +39,27 @@ final class TerminalTabController: NSObject {
     /// Called when anything the sidebar draws may have changed.
     var onStatusChange: ((TerminalTabController) -> Void)?
 
-    init(id: TabID, kind: TabKind, font: TerminalFont, size: TerminalSize) throws {
+    init(
+        id: TabID,
+        kind: TabKind,
+        font: TerminalFont,
+        size: TerminalSize,
+        shell: String? = nil
+    ) throws {
         self.id = id
         self.kind = kind
         self.font = font
+        self.shell = shell
         defaultSize = size
 
         super.init()
 
-        let first = try TerminalPaneController(font: font, cols: size.cols, rows: size.rows)
+        let first = try TerminalPaneController(
+            font: font,
+            cols: size.cols,
+            rows: size.rows,
+            shell: shell
+        )
         contentView.autoresizingMask = [.width, .height]
         contentView.frame = NSRect(origin: .zero, size: font.geometry.pixelSize(for: size))
 
@@ -158,7 +172,8 @@ final class TerminalTabController: NSObject {
         let newPane = try TerminalPaneController(
             font: font,
             cols: defaultSize.cols,
-            rows: defaultSize.rows
+            rows: defaultSize.rows,
+            shell: shell
         )
 
         let splitView = NSSplitView(frame: focused.view.frame)

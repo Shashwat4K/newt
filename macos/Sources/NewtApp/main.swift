@@ -15,11 +15,19 @@ application.setActivationPolicy(.regular)
 
 let arguments = Array(CommandLine.arguments.dropFirst())
 
+// Verification paths run a known shell so a check never depends on whose
+// dotfiles are installed. --login-shell opts back into the real one, for when
+// the point is real-world rendering: Nerd Font glyphs, a themed prompt.
+let verificationShell: String? =
+    arguments.contains("--login-shell") ? nil : OfflineRender.verificationShell
+
 // Headless check that a backgrounded tab keeps running. No window, no PNG.
 if arguments.contains("--background-check") {
     application.setActivationPolicy(.prohibited)
     do {
-        exit(try OfflineRender.runBackgroundCheck(fontSize: 13) ? 0 : 1)
+        exit(
+            try OfflineRender.runBackgroundCheck(fontSize: 13, shell: verificationShell) ? 0 : 1
+        )
     } catch {
         FileHandle.standardError.write(Data("newt: \(error)\n".utf8))
         exit(1)
@@ -29,8 +37,11 @@ if arguments.contains("--background-check") {
 // Offscreen mode: draw one frame to a PNG and exit, without a window.
 if let flag = arguments.firstIndex(of: "--render-to"), flag + 1 < arguments.count {
     let path = arguments[flag + 1]
+    // Any flag here is a flag, not a command to type. Phase 5 logged the same
+    // bug from the other direction, where `--keys` swallowed the flags after
+    // it and typed `--resize 40 8` into vim as literal text.
     let commandArgument = arguments.count > flag + 2 ? arguments[flag + 2] : nil
-    let command = commandArgument == "--type" ? nil : commandArgument
+    let command = (commandArgument?.hasPrefix("--") ?? true) ? nil : commandArgument
 
     // Everything after --type is typed as key events, one step per argument.
     // A step of the form <name> is a named key, e.g. <enter> or <escape>.
@@ -66,7 +77,8 @@ if let flag = arguments.firstIndex(of: "--render-to"), flag + 1 < arguments.coun
                 panes: panes ?? 1,
                 tabs: tabs ?? 1,
                 outputPath: path,
-                fontSize: 13
+                fontSize: 13,
+                shell: verificationShell
             )
             exit(0)
         } catch {
@@ -83,7 +95,8 @@ if let flag = arguments.firstIndex(of: "--render-to"), flag + 1 < arguments.coun
             outputPath: path,
             cols: 100,
             rows: 30,
-            fontSize: 13
+            fontSize: 13,
+            shell: verificationShell
         )
         exit(0)
     } catch {

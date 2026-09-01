@@ -36,6 +36,8 @@ final class TerminalWindowController: NSWindowController, NSWindowDelegate {
 
     /// Grid size used for tabs and panes created after the first.
     private let defaultSize: TerminalSize
+    /// Program every tab in this window runs. `nil` is the user's login shell.
+    private let shell: String?
 
     private static let sidebarWidth: CGFloat = 208
     private static let sidebarMinWidth: CGFloat = 150
@@ -65,8 +67,9 @@ final class TerminalWindowController: NSWindowController, NSWindowDelegate {
         fatalError("newt does not use storyboards")
     }
 
-    init(font: TerminalFont, cols: UInt16, rows: UInt16) throws {
+    init(font: TerminalFont, cols: UInt16, rows: UInt16, shell: String? = nil) throws {
         self.font = font
+        self.shell = shell
         defaultSize = TerminalSize(cols: cols, rows: rows)
 
         let gridSize = font.geometry.pixelSize(for: defaultSize)
@@ -200,7 +203,8 @@ final class TerminalWindowController: NSWindowController, NSWindowDelegate {
             id: id,
             kind: kind,
             font: font,
-            size: currentGridSize()
+            size: currentGridSize(),
+            shell: shell
         )
         tabs[id] = controller
         tree.insert(kind: kind, under: parent, id: id)

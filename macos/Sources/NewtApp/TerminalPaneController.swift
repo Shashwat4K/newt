@@ -24,10 +24,13 @@ final class TerminalPaneController: NSObject {
     private var lastTitle: String?
     private var lastReportedSize: TerminalSize
 
-    init(font: TerminalFont, cols: UInt16, rows: UInt16) throws {
+    /// - Parameter shell: program to run. `nil` means the user's login shell,
+    ///   which is what a terminal should do. Verification paths pass an
+    ///   explicit one so a check never depends on whose dotfiles are installed.
+    init(font: TerminalFont, cols: UInt16, rows: UInt16, shell: String? = nil) throws {
         self.font = font
         let initialSize = TerminalSize(cols: cols, rows: rows)
-        session = try TerminalSession(size: initialSize)
+        session = try TerminalSession(size: initialSize, shell: shell)
         view = TerminalView(font: font, cols: Int(cols), rows: Int(rows))
         lastReportedSize = initialSize
 

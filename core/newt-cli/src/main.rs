@@ -5,6 +5,7 @@
 //!
 //!     cargo run -p newt-cli -- "ls -1 | head -3"
 //!     cargo run -p newt-cli -- --cols 100 --rows 30 "echo hi"
+//!     cargo run -p newt-cli -- --shell /bin/sh "echo hi"
 
 use std::time::{Duration, Instant};
 
@@ -20,10 +21,19 @@ const POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let (size, command, trace_enabled, quiet_period, keys, resize_to) = parse_args(&args);
+    let Args {
+        size,
+        command,
+        trace_enabled,
+        quiet_period,
+        keys,
+        resize_to,
+        shell,
+    } = parse_args(&args);
 
     let config = SessionConfig {
         size,
+        shell,
         ..SessionConfig::default()
     };
 
@@ -47,9 +57,10 @@ fn main() {
         }
     };
 
-    // Wait for the prompt before typing at it. A heavy startup (oh-my-zsh,
-    // powerlevel10k) can take seconds to emit its first byte, and an empty
-    // screen must not be mistaken for a settled one.
+    // Wait for the prompt before typing at it. A login shell with a heavy
+    // startup can take seconds to emit its first byte, and an empty screen
+    // must not be mistaken for a settled one. `--shell /bin/sh` sidesteps that
+    // entirely when the point is to test newt rather than someone's dotfiles.
     settle(&session, WaitFor::FirstOutput, quiet_period);
 
     if let Err(e) = session.write(format!("{command}\n").as_bytes()) {
@@ -165,16 +176,25 @@ fn escape(bytes: &[u8]) -> String {
 }
 
 #[allow(clippy::type_complexity)]
-fn parse_args(
-    args: &[String],
-) -> (
-    SizeInCells,
-    String,
-    bool,
-    Duration,
-    Vec<String>,
-    Option<SizeInCells>,
-) {
+/// Parsed command line.
+///
+/// A struct rather than a tuple: this had grown to six positional fields, and
+/// the seventh is the one that decides *which shell runs*, which is far too
+/// important to identify by position.
+struct Args {
+    size: SizeInCells,
+    command: String,
+    trace_enabled: bool,
+    quiet_period: Duration,
+    keys: Vec<String>,
+    resize_to: Option<SizeInCells>,
+    /// Program to run. `None` uses the login shell, which is the right default
+    /// for a driver of a real terminal; pass `--shell /bin/sh` for a run that
+    /// must not depend on the invoking user's configuration.
+    shell: Option<String>,
+}
+
+fn parse_args(args: &[String]) -> Args {
     let mut cols = 80u16;
     let mut rows = 24u16;
     let mut trace = false;
@@ -182,6 +202,7 @@ fn parse_args(
     let mut command = String::from("echo newt is alive");
     let mut keys: Vec<String> = Vec::new();
     let mut resize_to: Option<SizeInCells> = None;
+    let mut shell: Option<String> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -199,6 +220,10 @@ fn parse_args(
                     .get(i + 1)
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(quiet_period_ms);
+                i += 2;
+            }
+            "--shell" => {
+                shell = args.get(i + 1).cloned();
                 i += 2;
             }
             "--trace" => {
@@ -232,12 +257,13 @@ fn parse_args(
         }
     }
 
-    (
-        SizeInCells::new(cols, rows),
+    Args {
+        size: SizeInCells::new(cols, rows),
         command,
-        trace,
-        Duration::from_millis(quiet_period_ms),
+        trace_enabled: trace,
+        quiet_period: Duration::from_millis(quiet_period_ms),
         keys,
         resize_to,
-    )
+        shell,
+    }
 }

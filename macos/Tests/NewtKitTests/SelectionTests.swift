@@ -12,10 +12,22 @@ final class SelectionTests: XCTestCase {
         // the same row as the output and no row is exactly the text.
         try session.write("printf '\(text)\\n'\n")
 
+        // Wait for exactly what the assertions need: a row that *is* the text.
+        //
+        // Waiting on the screen merely containing it is a race — the echoed
+        // `printf 'hello world\n'` command line contains it too, so the wait
+        // returned as soon as the echo landed, and `rowContaining` then looked
+        // for an exact row that had not been printed yet. Under load that lost
+        // often enough to fail the suite while passing in isolation. Phase 6
+        // logged this exact confusion for the search and fixed it there; the
+        // wait kept the old, looser predicate.
         let deadline = Date().addingTimeInterval(5)
         while Date() < deadline {
             Thread.sleep(forTimeInterval: 0.02)
-            if try session.withSnapshot({ $0.text().contains(text) }) { return session }
+            let arrived = try session.withSnapshot { snapshot in
+                (0..<snapshot.rows).contains { snapshot.text(row: $0) == text }
+            }
+            if arrived { return session }
         }
         XCTFail("output never appeared")
         return session
