@@ -141,22 +141,39 @@ enum OfflineRender {
             if ready { break }
         }
 
-        // Then wait for the screen to stop changing. First output is not the
-        // same as a finished prompt: splitting resizes every pane, which makes
-        // the shell redraw, and capturing during that redraw yields the mostly
-        // blank panes this check exists to prevent.
+        // Then wait for the screen to stop changing — but not too eagerly.
+        //
+        // Two things make a pane look settled when it is not. Splitting resizes
+        // every pane, so the shell redraws. And powerlevel10k draws an *instant
+        // prompt* first and replaces it with the real one a second or two
+        // later, which means the screen goes quiet twice, and the first quiet
+        // period is the wrong one to photograph. Phases 0–1 hit the same class
+        // of bug from the other side, where "no output yet" read as "settled".
+        //
+        // Hence a floor on elapsed time as well as a quiet period.
+        let start = Date()
+        let minimumWait: TimeInterval = 2.5
+        let quietPeriod: TimeInterval = 1.2
         var last = paneText(controller)
         var unchangedSince = Date()
-        let settleDeadline = Date().addingTimeInterval(6)
+        let settleDeadline = start.addingTimeInterval(10)
         while Date() < settleDeadline {
             RunLoop.main.run(until: Date().addingTimeInterval(0.05))
             let current = paneText(controller)
             if current != last {
                 last = current
                 unchangedSince = Date()
-            } else if Date().timeIntervalSince(unchangedSince) >= 0.6 {
+            } else if Date().timeIntervalSince(unchangedSince) >= quietPeriod,
+                Date().timeIntervalSince(start) >= minimumWait
+            {
                 break
             }
+        }
+
+        // Pull the current grid into every view before drawing, rather than
+        // hoping a display-link tick lands between the last resize and here.
+        for pane in controller.panes {
+            pane.refreshNow()
         }
 
         guard let content = controller.hostWindow.contentView else {

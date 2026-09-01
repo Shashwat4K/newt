@@ -92,6 +92,18 @@ final class TerminalPaneController: NSObject {
         }
     }
 
+    /// Copy the current grid into the view immediately, outside the tick.
+    ///
+    /// The window never needs this — its display link runs at screen rate, so
+    /// the view is at most a frame behind. Offscreen capture does: it draws
+    /// straight from `GridBuffer`, and without a tick between the last resize
+    /// and `cacheDisplay` it photographs a stale buffer while the core already
+    /// holds the right grid. That made `--render-to` intermittently produce
+    /// blank panes, which is worse than useless in a verification tool.
+    func refreshNow() {
+        try? session.withSnapshot { view.apply($0) }
+    }
+
     /// Draw the current frame. Foreground panes only — this is the render tick.
     @objc private func tick(_ link: CADisplayLink) {
         // The view may have been resized by the split view since the last tick.
