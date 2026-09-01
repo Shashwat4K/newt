@@ -8,6 +8,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var controllers: [TerminalWindowController] = []
     private let font = TerminalFont(size: 13)
 
+    /// One timer for the whole app, polling every session's title, exit, and
+    /// agent state. See `StatusTicker` for why this is not the display link.
+    private lazy var statusTicker = StatusTicker { [weak self] in
+        guard let self else { return }
+        for controller in controllers {
+            controller.pollStatus()
+        }
+    }
+
     /// Command written into the first session at startup. Convenient for
     /// scripted demos; typing is the normal path.
     var initialCommand: String?
@@ -22,6 +31,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             presentStartupFailure(error)
         }
 
+        statusTicker.start()
         NSApp.activate(ignoringOtherApps: true)
     }
 
@@ -69,19 +79,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    @objc func newTab(_ sender: Any?) {
-        do {
-            let controller = try makeWindow()
-            // Attaching to the key window makes this a tab of it rather than a
-            // separate window; native tabbing does the rest.
-            if let current = NSApp.keyWindow {
-                current.addTabbedWindow(controller.hostWindow, ordered: .above)
-            }
-            controller.start()
-        } catch {
-            presentStartupFailure(error, fatal: false)
-        }
-    }
+    // New Tab is no longer an app-level concern: a tab lives inside a window's
+    // sidebar, so `TerminalWindowController.newTab(_:)` handles it through the
+    // responder chain. Native window tabbing, and the `addTabbedWindow` call
+    // that drove it, are gone with it.
 
     // MARK: - Menu
 
@@ -114,7 +115,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func shellMenu() -> NSMenu {
         let menu = NSMenu(title: "Shell")
         menu.addItem(withTitle: "New Window", action: #selector(newWindow(_:)), keyEquivalent: "n")
-        menu.addItem(withTitle: "New Tab", action: #selector(newTab(_:)), keyEquivalent: "t")
+        menu.addItem(
+            withTitle: "New Tab",
+            action: #selector(TerminalWindowController.newTab(_:)),
+            keyEquivalent: "t"
+        )
         menu.addItem(NSMenuItem.separator())
         menu.addItem(
             withTitle: "Split Right",
@@ -131,6 +136,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             withTitle: "Close Pane",
             action: #selector(TerminalWindowController.closeFocusedPane(_:)),
             keyEquivalent: "w"
+        )
+        menu.addItem(
+            withTitle: "Close Tab",
+            action: #selector(TerminalWindowController.closeSelectedTab(_:)),
+            keyEquivalent: "W"
         )
         return menu
     }
@@ -160,6 +170,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func viewMenu() -> NSMenu {
         let menu = NSMenu(title: "View")
+
+        let toggle = NSMenuItem(
+            title: "Toggle Sidebar",
+            action: #selector(TerminalWindowController.toggleSidebar(_:)),
+            keyEquivalent: "s"
+        )
+        toggle.keyEquivalentModifierMask = [.command, .option]
+        menu.addItem(toggle)
+        menu.addItem(NSMenuItem.separator())
+
+        // ⌃⇥ rather than ⌘⇥, which belongs to the app switcher, and ⌃⇥ is what
+        // browsers and editors already use for "next tab".
+        let nextTab = NSMenuItem(
+            title: "Select Next Tab",
+            action: #selector(TerminalWindowController.selectNextTab(_:)),
+            keyEquivalent: "\u{9}"
+        )
+        nextTab.keyEquivalentModifierMask = [.control]
+        menu.addItem(nextTab)
+
+        let previousTab = NSMenuItem(
+            title: "Select Previous Tab",
+            action: #selector(TerminalWindowController.selectPreviousTab(_:)),
+            keyEquivalent: "\u{9}"
+        )
+        previousTab.keyEquivalentModifierMask = [.control, .shift]
+        menu.addItem(previousTab)
+
+        // ⌘1…⌘9 select by position in the sidebar. The action reads the number
+        // back off the key equivalent rather than needing nine selectors.
+        for number in 1...9 {
+            let item = NSMenuItem(
+                title: "Select Tab \(number)",
+                action: #selector(TerminalWindowController.selectTabByNumber(_:)),
+                keyEquivalent: "\(number)"
+            )
+            item.isHidden = number > 1
+            item.isAlternate = false
+            menu.addItem(item)
+        }
+
+        menu.addItem(NSMenuItem.separator())
+
         let next = NSMenuItem(
             title: "Select Next Pane",
             action: #selector(TerminalWindowController.focusNextPane(_:)),

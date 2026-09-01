@@ -2,11 +2,17 @@ import AppKit
 import Foundation
 import NewtKit
 
-/// One window: a tree of split panes, plus the find bar.
+/// One window: a sidebar of tabs on the left, the selected tab's pane tree on
+/// the right, and the find bar floating over it.
 ///
-/// Panes are composed with `NSSplitView` rather than a hand-rolled layout tree —
-/// the split view already handles dividers, dragging, and proportional resizing,
-/// and its subview hierarchy *is* the tree.
+/// Phase 7 made this class the window, the tab, *and* the pane tree at once,
+/// because native window tabbing meant one window was one tab. Stage 2 drops
+/// native tabbing — see the plan for why — so those three become three types.
+/// What is left here is the window and the composition; a tab owns its panes.
+///
+/// It stays an `NSWindowController`: menu commands reach their target through
+/// the responder chain, and a plain `NSObject` is not in it. That was a
+/// Phase-7 finding and it is still load-bearing.
 @MainActor
 final class TerminalWindowController: NSWindowController, NSWindowDelegate {
     /// Kept as a non-optional alongside `NSWindowController.window`, which is
@@ -14,15 +20,45 @@ final class TerminalWindowController: NSWindowController, NSWindowDelegate {
     let hostWindow: NSWindow
 
     private let font: TerminalFont
-    /// Holds the pane tree. The find bar floats above it.
+    /// `NSSplitViewController` rather than a hand-laid `NSSplitView`: it owns
+    /// the sidebar's minimum and maximum thickness, its collapsed state, the
+    /// standard vibrant sidebar material, and `toggleSidebar(_:)`. Laying the
+    /// two halves out by hand meant setting frames that AppKit then re-derived,
+    /// and the pane area came out a sidebar's width too narrow.
+    private let bodyController = NSSplitViewController()
+    private let sidebar = SidebarViewController()
+    /// Holds the selected tab's pane tree. The find bar floats above it.
     private let paneContainer = NSView()
     private let findBar = FindBar()
 
-    private(set) var panes: [TerminalPaneController] = []
-    private(set) var focusedPane: TerminalPaneController?
+    private var tree = TabTree()
+    private var tabs: [TabID: TerminalTabController] = [:]
 
-    /// Grid size used for panes created after the first.
+    /// Grid size used for tabs and panes created after the first.
     private let defaultSize: TerminalSize
+
+    private static let sidebarWidth: CGFloat = 208
+    private static let sidebarMinWidth: CGFloat = 150
+    private static let sidebarMaxWidth: CGFloat = 340
+
+    var selectedTab: TerminalTabController? {
+        tree.selected.flatMap { tabs[$0] }
+    }
+
+    /// The selected tab's panes. `OfflineRender` reads this.
+    var panes: [TerminalPaneController] { selectedTab?.panes ?? [] }
+
+    /// Frames of the pieces that decide how much room the grid gets. Reported
+    /// by `--render-to --panes`, because a collapsed pane is a layout problem
+    /// and the grid sizes alone do not say which view lost its space.
+    var debugLayout: String {
+        func size(_ view: NSView) -> String {
+            "\(Int(view.frame.width))x\(Int(view.frame.height))"
+        }
+        let tabContent = selectedTab.map { size($0.contentView) } ?? "-"
+        return "split \(size(bodyController.view)) sidebar \(size(sidebar.scrollView)) "
+            + "container \(size(paneContainer)) tab \(tabContent)"
+    }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) {
@@ -33,8 +69,13 @@ final class TerminalWindowController: NSWindowController, NSWindowDelegate {
         self.font = font
         defaultSize = TerminalSize(cols: cols, rows: rows)
 
-        let first = try TerminalPaneController(font: font, cols: cols, rows: rows)
-        let contentRect = NSRect(origin: .zero, size: font.geometry.pixelSize(for: defaultSize))
+        let gridSize = font.geometry.pixelSize(for: defaultSize)
+        let contentRect = NSRect(
+            x: 0,
+            y: 0,
+            width: gridSize.width + Self.sidebarWidth,
+            height: gridSize.height
+        )
 
         hostWindow = NSWindow(
             contentRect: contentRect,
@@ -43,43 +84,69 @@ final class TerminalWindowController: NSWindowController, NSWindowDelegate {
             defer: false
         )
         hostWindow.title = "newt"
-        hostWindow.contentMinSize = font.geometry.pixelSize(for: TerminalSize(cols: 20, rows: 5))
-        // Opting into native window tabbing gives ⌘T, the tab bar, and tab
-        // switching for free, rather than reimplementing all of it.
-        hostWindow.tabbingMode = .preferred
-        hostWindow.tabbingIdentifier = "newt.terminal"
+        hostWindow.contentMinSize = NSSize(
+            width: font.geometry.pixelSize(for: TerminalSize(cols: 20, rows: 5)).width
+                + Self.sidebarMinWidth,
+            height: font.geometry.pixelSize(for: TerminalSize(cols: 20, rows: 5)).height
+        )
+        // Explicitly disallowed, not left to default: `.automatic` puts "Merge
+        // All Windows" back in the Window menu and silently reintroduces native
+        // tabs behind the sidebar.
+        hostWindow.tabbingMode = .disallowed
 
-        let container = NSView(frame: contentRect)
-        paneContainer.frame = contentRect
-        paneContainer.autoresizingMask = [.width, .height]
-        container.addSubview(paneContainer)
+        let sidebarPane = NSViewController()
+        // The item's starting thickness comes from its view's frame; without
+        // this the sidebar opens collapsed to `minimumThickness`.
+        sidebar.scrollView.frame = NSRect(
+            x: 0,
+            y: 0,
+            width: Self.sidebarWidth,
+            height: contentRect.height
+        )
+        sidebarPane.view = sidebar.scrollView
+        let sidebarItem = NSSplitViewItem(sidebarWithViewController: sidebarPane)
+        sidebarItem.minimumThickness = Self.sidebarMinWidth
+        sidebarItem.maximumThickness = Self.sidebarMaxWidth
+        sidebarItem.canCollapse = true
+        // The grid takes the space a resize adds; the sidebar keeps its width.
+        sidebarItem.holdingPriority = .defaultHigh
 
-        first.view.frame = paneContainer.bounds
-        first.view.autoresizingMask = [.width, .height]
-        paneContainer.addSubview(first.view)
+        let contentPane = NSViewController()
+        paneContainer.frame = NSRect(
+            x: 0,
+            y: 0,
+            width: gridSize.width,
+            height: contentRect.height
+        )
+        contentPane.view = paneContainer
+        let contentItem = NSSplitViewItem(viewController: contentPane)
+
+        bodyController.splitViewItems = [sidebarItem, contentItem]
+        bodyController.view.frame = contentRect
 
         findBar.isHidden = true
         findBar.autoresizingMask = [.minXMargin, .minYMargin]
         findBar.setFrameOrigin(
             NSPoint(
-                x: contentRect.maxX - findBar.frame.width - 12,
-                y: contentRect.maxY - findBar.frame.height - 12
+                x: paneContainer.bounds.maxX - findBar.frame.width - 12,
+                y: paneContainer.bounds.maxY - findBar.frame.height - 12
             )
         )
-        container.addSubview(findBar)
+        // Over the grid, not over the sidebar: the find bar searches the
+        // focused pane, so it belongs above what it is searching.
+        paneContainer.addSubview(findBar)
 
-        hostWindow.contentView = container
+        hostWindow.contentViewController = bodyController
+        hostWindow.setContentSize(contentRect.size)
 
-        // NSWindowController puts this object in the responder chain, which is
-        // how menu commands like Split Right reach it.
         super.init(window: hostWindow)
 
         hostWindow.delegate = self
-        adopt(first)
-        focusedPane = first
+
+        sidebar.onSelect = { [weak self] id in self?.select(id) }
 
         findBar.onFind = { [weak self] query, forward in
-            guard let self, let pane = self.focusedPane else { return false }
+            guard let self, let pane = selectedTab?.focusedPane else { return false }
             do {
                 return try pane.session.find(query, forward: forward)
             } catch {
@@ -88,168 +155,213 @@ final class TerminalWindowController: NSWindowController, NSWindowDelegate {
             }
         }
         findBar.onClose = { [weak self] in
-            guard let self, let pane = self.focusedPane else { return }
-            self.hostWindow.makeFirstResponder(pane.view)
+            guard let self else { return }
+            selectedTab?.takeFocus(in: hostWindow)
         }
+
+        try addTab(kind: .shell, under: nil, select: true)
     }
 
-    /// Show the window and start every pane.
+    /// Show the window and start the selected tab.
     func start(runningCommand command: String? = nil) {
         hostWindow.makeKeyAndOrderFront(nil)
-        for pane in panes {
-            pane.start()
-        }
-        if let pane = focusedPane {
-            hostWindow.makeFirstResponder(pane.view)
-            if let command {
+        sidebar.reload()
+
+        if let tab = selectedTab {
+            tab.activate(in: paneContainer)
+            tab.takeFocus(in: hostWindow)
+            if let command, let pane = tab.focusedPane {
                 try? pane.session.write("\(command)\n")
             }
         }
     }
 
     func stop() {
-        for pane in panes {
-            pane.stop()
+        for tab in tabs.values {
+            tab.stop()
         }
     }
 
-    // MARK: - Panes
-
-    private func adopt(_ pane: TerminalPaneController) {
-        panes.append(pane)
-        pane.onFocus = { [weak self] pane in self?.focusedPane = pane }
-        pane.onExit = { [weak self] pane in self?.close(pane) }
-        pane.onTitleChange = { [weak self] pane, title in
-            // Only the focused pane names the window; otherwise a background
-            // pane's title would fight the one you are looking at.
-            guard let self, self.focusedPane === pane else { return }
-            self.hostWindow.title = title
+    /// Called by the app-wide status ticker. Covers background tabs too.
+    func pollStatus() {
+        for tab in tabs.values {
+            tab.pollStatus()
         }
     }
 
-    @objc func splitVertically(_ sender: Any?) {
-        split(vertical: true)
+    // MARK: - Tabs
+
+    @discardableResult
+    private func addTab(kind: TabKind, under parent: TabID?, select shouldSelect: Bool) throws
+        -> TabID
+    {
+        let id = TabID()
+        let controller = try TerminalTabController(
+            id: id,
+            kind: kind,
+            font: font,
+            size: currentGridSize()
+        )
+        tabs[id] = controller
+        tree.insert(kind: kind, under: parent, id: id)
+
+        controller.onFocusChange = { [weak self] tab in
+            guard let self else { return }
+            hostWindow.title = tab.displayTitle
+            sidebar.reloadRow(tab.id)
+        }
+        controller.onStatusChange = { [weak self] tab in
+            guard let self else { return }
+            if tree.selected == tab.id {
+                hostWindow.title = tab.displayTitle
+            }
+            sidebar.reloadRow(tab.id)
+        }
+        controller.onEmpty = { [weak self] tab in self?.closeTab(tab.id) }
+
+        sidebar.controllers = tabs
+        sidebar.tree = tree
+
+        if shouldSelect {
+            select(id)
+        } else {
+            sidebar.reload()
+        }
+        return id
     }
 
-    @objc func splitHorizontally(_ sender: Any?) {
-        split(vertical: false)
+    /// Grid size a new tab should start at, so it matches the window rather
+    /// than the size the window was created with.
+    private func currentGridSize() -> TerminalSize {
+        let fitted = font.geometry.gridSize(fitting: paneContainer.bounds.size)
+        return fitted.cols >= 20 && fitted.rows >= 5 ? fitted : defaultSize
     }
 
-    /// Replace the focused pane with a split holding it and a new pane.
-    ///
-    /// - Parameter vertical: true puts the panes side by side.
-    private func split(vertical: Bool) {
-        guard let focused = focusedPane, let superview = focused.view.superview else { return }
+    /// Swap the visible tab. Sessions are never torn down by this.
+    private func select(_ id: TabID) {
+        guard let next = tabs[id] else { return }
+        // Already showing: selecting it again would deactivate and reactivate
+        // the same tab, which tears down and rebuilds its display links for
+        // nothing — and, via the sidebar, recurses.
+        if next.isActive { return }
 
-        let newPane: TerminalPaneController
+        if let current = selectedTab, current !== next {
+            current.deactivate()
+        }
+        tree.select(id)
+        next.activate(in: paneContainer)
+        next.synchronizeSize(to: paneContainer)
+        next.takeFocus(in: hostWindow)
+        hostWindow.title = next.displayTitle
+
+        keepFindBarOnTop()
+        sidebar.tree = tree
+        sidebar.reload()
+    }
+
+    @objc func newTab(_ sender: Any?) {
         do {
-            newPane = try TerminalPaneController(
-                font: font,
-                cols: defaultSize.cols,
-                rows: defaultSize.rows
-            )
+            try addTab(kind: .shell, under: nil, select: true)
         } catch {
             reportPaneFailure(error)
-            return
         }
-
-        let splitView = NSSplitView(frame: focused.view.frame)
-        splitView.isVertical = vertical
-        splitView.dividerStyle = .thin
-        splitView.autoresizingMask = focused.view.autoresizingMask
-
-        // Put the split view exactly where the focused pane was, whether that
-        // was directly in the container or inside another split.
-        if let parent = superview as? NSSplitView {
-            let index = parent.arrangedSubviews.firstIndex(of: focused.view) ?? 0
-            focused.view.removeFromSuperview()
-            parent.insertArrangedSubview(splitView, at: index)
-        } else {
-            focused.view.removeFromSuperview()
-            superview.addSubview(splitView)
-        }
-
-        focused.view.autoresizingMask = [.width, .height]
-        newPane.view.autoresizingMask = [.width, .height]
-        splitView.addArrangedSubview(focused.view)
-        splitView.addArrangedSubview(newPane.view)
-        splitView.adjustSubviews()
-
-        adopt(newPane)
-        newPane.start()
-        keepFindBarOnTop()
-
-        hostWindow.makeFirstResponder(newPane.view)
     }
 
-    @objc func closeFocusedPane(_ sender: Any?) {
-        guard let focused = focusedPane else { return }
-        close(focused)
+    @objc func closeSelectedTab(_ sender: Any?) {
+        guard let id = tree.selected else { return }
+        closeTab(id)
     }
 
-    /// Remove a pane, collapsing any split left with a single child.
-    private func close(_ pane: TerminalPaneController) {
-        guard let index = panes.firstIndex(where: { $0 === pane }) else { return }
+    /// Close a tab and everything nested under it.
+    private func closeTab(_ id: TabID) {
+        let removed = tree.remove(id)
+        guard !removed.isEmpty else { return }
 
-        pane.stop()
-        panes.remove(at: index)
-
-        let superview = pane.view.superview
-        pane.view.removeFromSuperview()
-
-        // A split with one child left is no longer a split; collapsing it keeps
-        // the tree from filling with single-child dividers.
-        if let split = superview as? NSSplitView, split.arrangedSubviews.count == 1 {
-            let survivor = split.arrangedSubviews[0]
-            let frame = split.frame
-            let mask = split.autoresizingMask
-            let parent = split.superview
-
-            survivor.removeFromSuperview()
-            split.removeFromSuperview()
-
-            survivor.frame = frame
-            survivor.autoresizingMask = mask
-            if let parentSplit = parent as? NSSplitView {
-                parentSplit.addArrangedSubview(survivor)
-                parentSplit.adjustSubviews()
-            } else {
-                parent?.addSubview(survivor)
-            }
+        for removedID in removed {
+            let tab = tabs.removeValue(forKey: removedID)
+            tab?.deactivate()
+            tab?.stop()
         }
 
-        keepFindBarOnTop()
+        sidebar.controllers = tabs
+        sidebar.tree = tree
 
-        if panes.isEmpty {
+        if tabs.isEmpty {
             hostWindow.close()
             return
         }
 
-        focusedPane = panes.last
-        if let next = focusedPane {
-            hostWindow.makeFirstResponder(next.view)
+        if let selected = tree.selected {
+            // The tree already chose the neighbour; activate it for real.
+            tree.select(selected)
+            tabs[selected]?.activate(in: paneContainer)
+            tabs[selected]?.synchronizeSize(to: paneContainer)
+            tabs[selected]?.takeFocus(in: hostWindow)
+            hostWindow.title = tabs[selected]?.displayTitle ?? "newt"
+            keepFindBarOnTop()
+        }
+        sidebar.reload()
+    }
+
+    @objc func selectNextTab(_ sender: Any?) {
+        tree.selectNext()
+        if let id = tree.selected { select(id) }
+    }
+
+    @objc func selectPreviousTab(_ sender: Any?) {
+        tree.selectPrevious()
+        if let id = tree.selected { select(id) }
+    }
+
+    /// ⌘1…⌘9, by position in the sidebar.
+    @objc func selectTabByNumber(_ sender: Any?) {
+        guard let item = sender as? NSMenuItem, let index = Int(item.keyEquivalent) else { return }
+        tree.select(displayIndex: index - 1)
+        if let id = tree.selected { select(id) }
+    }
+
+    @objc func toggleSidebar(_ sender: Any?) {
+        bodyController.toggleSidebar(sender)
+        selectedTab?.synchronizeSize(to: paneContainer)
+    }
+
+    // MARK: - Panes
+
+    @objc func splitVertically(_ sender: Any?) {
+        splitSelected(vertical: true)
+    }
+
+    @objc func splitHorizontally(_ sender: Any?) {
+        splitSelected(vertical: false)
+    }
+
+    private func splitSelected(vertical: Bool) {
+        guard let tab = selectedTab else { return }
+        do {
+            try tab.split(vertical: vertical)
+            keepFindBarOnTop()
+        } catch {
+            reportPaneFailure(error)
         }
     }
 
+    @objc func closeFocusedPane(_ sender: Any?) {
+        selectedTab?.closeFocusedPane()
+        keepFindBarOnTop()
+    }
+
     @objc func focusNextPane(_ sender: Any?) {
-        cycleFocus(by: 1)
+        selectedTab?.cycleFocus(by: 1)
     }
 
     @objc func focusPreviousPane(_ sender: Any?) {
-        cycleFocus(by: -1)
-    }
-
-    private func cycleFocus(by offset: Int) {
-        guard !panes.isEmpty else { return }
-        let current = panes.firstIndex(where: { $0 === focusedPane }) ?? 0
-        let next = (current + offset + panes.count) % panes.count
-        hostWindow.makeFirstResponder(panes[next].view)
+        selectedTab?.cycleFocus(by: -1)
     }
 
     /// The find bar must stay above the pane tree after any change to it.
     private func keepFindBarOnTop() {
         findBar.removeFromSuperview()
-        hostWindow.contentView?.addSubview(findBar, positioned: .above, relativeTo: nil)
+        paneContainer.addSubview(findBar, positioned: .above, relativeTo: nil)
     }
 
     // MARK: - Find
@@ -268,12 +380,14 @@ final class TerminalWindowController: NSWindowController, NSWindowDelegate {
 
     // MARK: - Window
 
-    /// Snap the window to whole cells, but only when a single pane fills it.
+    /// Snap the window to whole cells, but only when a single pane fills the
+    /// selected tab.
     ///
     /// With splits there is no single grid to snap to — dividers and rounding
-    /// mean the panes cannot all land on cell boundaries at once.
+    /// mean the panes cannot all land on cell boundaries at once. The sidebar's
+    /// width is held out of the calculation for the same reason.
     func windowWillResize(_ sender: NSWindow, to frameSize: NSSize) -> NSSize {
-        guard panes.count == 1 else { return frameSize }
+        guard let tab = selectedTab, tab.panes.count == 1 else { return frameSize }
 
         let currentFrame = sender.frame
         let currentContent = sender.contentRect(forFrameRect: currentFrame).size
@@ -281,19 +395,27 @@ final class TerminalWindowController: NSWindowController, NSWindowDelegate {
             width: currentFrame.width - currentContent.width,
             height: currentFrame.height - currentContent.height
         )
+        let reserved = currentContent.width - paneContainer.bounds.width
 
-        let proposedContent = NSSize(
-            width: frameSize.width - chrome.width,
+        let proposedGrid = NSSize(
+            width: frameSize.width - chrome.width - reserved,
             height: frameSize.height - chrome.height
         )
-        let snapped = font.geometry.pixelSize(for: font.geometry.gridSize(fitting: proposedContent))
+        let snapped = font.geometry.pixelSize(for: font.geometry.gridSize(fitting: proposedGrid))
 
-        return NSSize(width: snapped.width + chrome.width, height: snapped.height + chrome.height)
+        return NSSize(
+            width: snapped.width + chrome.width + reserved,
+            height: snapped.height + chrome.height
+        )
     }
 
     func windowDidResize(_ notification: Notification) {
-        for pane in panes {
-            pane.synchronizeSize()
+        // Every tab, not just the visible one: a background tab's content view
+        // is out of the hierarchy so its bounds do not follow the window, and
+        // skipping it would reflow a running full-screen program on every
+        // switch instead of on the resize that actually caused it.
+        for tab in tabs.values {
+            tab.synchronizeSize(to: paneContainer)
         }
     }
 

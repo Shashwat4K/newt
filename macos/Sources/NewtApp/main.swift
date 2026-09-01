@@ -15,6 +15,17 @@ application.setActivationPolicy(.regular)
 
 let arguments = Array(CommandLine.arguments.dropFirst())
 
+// Headless check that a backgrounded tab keeps running. No window, no PNG.
+if arguments.contains("--background-check") {
+    application.setActivationPolicy(.prohibited)
+    do {
+        exit(try OfflineRender.runBackgroundCheck(fontSize: 13) ? 0 : 1)
+    } catch {
+        FileHandle.standardError.write(Data("newt: \(error)\n".utf8))
+        exit(1)
+    }
+}
+
 // Offscreen mode: draw one frame to a PNG and exit, without a window.
 if let flag = arguments.firstIndex(of: "--render-to"), flag + 1 < arguments.count {
     let path = arguments[flag + 1]
@@ -38,13 +49,25 @@ if let flag = arguments.firstIndex(of: "--render-to"), flag + 1 < arguments.coun
     }
     application.setActivationPolicy(.prohibited)
 
-    // --panes N renders a split window instead of a single grid.
-    if let panesFlag = arguments.firstIndex(of: "--panes"),
-        panesFlag + 1 < arguments.count,
-        let panes = Int(arguments[panesFlag + 1])
-    {
+    // --panes N splits the selected tab; --tabs N opens N tabs in the sidebar.
+    // Either one renders the whole window rather than a single grid.
+    func intFlag(_ name: String) -> Int? {
+        guard let flag = arguments.firstIndex(of: name), flag + 1 < arguments.count else {
+            return nil
+        }
+        return Int(arguments[flag + 1])
+    }
+
+    let panes = intFlag("--panes")
+    let tabs = intFlag("--tabs")
+    if panes != nil || tabs != nil {
         do {
-            try OfflineRender.runSplit(panes: panes, outputPath: path, fontSize: 13)
+            try OfflineRender.runSplit(
+                panes: panes ?? 1,
+                tabs: tabs ?? 1,
+                outputPath: path,
+                fontSize: 13
+            )
             exit(0)
         } catch {
             FileHandle.standardError.write(Data("newt: \(error)\n".utf8))

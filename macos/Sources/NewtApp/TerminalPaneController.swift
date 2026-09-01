@@ -48,9 +48,26 @@ final class TerminalPaneController: NSObject {
         displayLink = link
     }
 
-    func stop() {
+    /// Stop drawing, without touching the session.
+    ///
+    /// This is what a background tab costs: nothing. The PTY reader thread, the
+    /// parser, and the grid all live in the core and are entirely independent
+    /// of the display link, so a suspended pane keeps consuming output and
+    /// simply stops copying it to the screen. Nothing is buffered and nothing
+    /// is lost — `GridBuffer` copies the whole grid on the next `apply`.
+    func suspend() {
         displayLink?.invalidate()
         displayLink = nil
+    }
+
+    /// Resume drawing after `suspend()`, repainting from scratch.
+    func resume() {
+        view.needsFullRedraw = true
+        start()
+    }
+
+    func stop() {
+        suspend()
     }
 
     /// Recompute the grid from the view's bounds and tell the core.
@@ -62,6 +79,12 @@ final class TerminalPaneController: NSObject {
         guard grid != lastReportedSize else { return }
         lastReportedSize = grid
 
+        // A reflow rewrites the whole grid, and the view's bounds just changed
+        // under it, so the damage list no longer describes what is on screen.
+        // Without this a pane that has just been split keeps whatever it drew
+        // at its old size, which reads as a nearly blank pane.
+        view.needsFullRedraw = true
+
         do {
             try session.resize(to: grid)
         } catch {
@@ -69,6 +92,7 @@ final class TerminalPaneController: NSObject {
         }
     }
 
+    /// Draw the current frame. Foreground panes only — this is the render tick.
     @objc private func tick(_ link: CADisplayLink) {
         // The view may have been resized by the split view since the last tick.
         synchronizeSize()
@@ -78,17 +102,24 @@ final class TerminalPaneController: NSObject {
                 view.apply(snapshot)
             }
         } catch {
-            stop()
-            return
+            suspend()
         }
+    }
 
+    /// Report title changes and process exit. Called by the app-wide status
+    /// ticker for *every* pane, foreground or not.
+    ///
+    /// This deliberately does not live in `tick`: a background tab's display
+    /// link is suspended, so a shell that exits there would otherwise never be
+    /// noticed and its tab would sit in the sidebar forever.
+    func pollStatus() {
         if let title = session.title, title != lastTitle {
             lastTitle = title
             onTitleChange?(self, title)
         }
 
         if session.hasExited {
-            stop()
+            suspend()
             onExit?(self)
         }
     }

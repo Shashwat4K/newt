@@ -53,12 +53,26 @@ final class TerminalView: NSView {
         fatalError("newt does not use storyboards")
     }
 
+    /// Repaint everything on the next frame, ignoring the damage list.
+    ///
+    /// Set when a pane resumes after its tab was in the background. A suspended
+    /// pane stops taking snapshots, so the damage the core reports on the first
+    /// frame back describes changes since the last snapshot rather than since
+    /// the last *draw* — trusting it leaves stale rows on screen.
+    var needsFullRedraw = false
+
     /// Adopt a new frame of terminal state and mark what changed for redraw.
     func apply(_ snapshot: GridSnapshot) {
         buffer.update(from: snapshot)
 
         if let first = buffer.cell(col: 0, row: 0) {
             backgroundColor = cgColor(first.bg)
+        }
+
+        if needsFullRedraw {
+            needsFullRedraw = false
+            setNeedsDisplay(bounds)
+            return
         }
 
         for row in buffer.damagedRows {
