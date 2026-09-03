@@ -277,49 +277,156 @@ pub extern "C" fn newt_last_error() -> *const c_char {
 /// Start a session running `shell` (null for the user's login shell) in `cwd`
 /// (null for the process working directory).
 ///
+/// A borrowed byte slice.
+///
+/// Length-prefixed rather than NUL-terminated, matching
+/// [`newt_session_write`] and [`newt_session_send_text`]: the boundary deals in
+/// bytes with an explicit length everywhere else, and a shell argument may
+/// legitimately contain anything but NUL.
+///
+/// An empty slice — null pointer or zero length — means "not supplied", and
+/// each field below says what that defaults to.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct NewtBytes {
+    pub ptr: *const u8,
+    pub len: usize,
+}
+
+/// One environment variable.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct NewtEnvVar {
+    pub key: NewtBytes,
+    pub value: NewtBytes,
+}
+
+/// Everything needed to start a session.
+///
+/// A struct rather than a longer parameter list. `newt_session_new` already
+/// took five positionals and needed four more; adding them one at a time is how
+/// an ABI rots, and it makes every call site a row of unlabelled arguments.
+/// One call taking plain data is narrower in spirit than a wide signature —
+/// still no callbacks, no object graph, and no platform types.
+#[repr(C)]
+pub struct NewtSessionSpec {
+    pub cols: u16,
+    pub rows: u16,
+    pub scrollback_lines: u32,
+    /// Program to run. Empty means the user's login shell.
+    pub program: NewtBytes,
+    /// Arguments, excluding argv[0]. May be null when `arg_count` is zero.
+    pub args: *const NewtBytes,
+    pub arg_count: usize,
+    /// Variables added to the inherited environment, overriding on collision.
+    /// May be null when `env_count` is zero.
+    pub env: *const NewtEnvVar,
+    pub env_count: usize,
+    /// Working directory. Empty means this process's.
+    pub cwd: NewtBytes,
+    /// Value advertised as `TERM`. Empty means `xterm-256color`.
+    pub term: NewtBytes,
+}
+
+/// Start a session.
+///
 /// Returns null on failure; see [`newt_last_error`].
 ///
 /// # Safety
 ///
-/// `shell` and `cwd`, when non-null, must point to NUL-terminated strings.
+/// `spec` must be non-null and point to a fully initialised
+/// [`NewtSessionSpec`]. Every byte slice it names must either be empty or point
+/// to `len` readable bytes, and `args`/`env` must point to `arg_count`/
+/// `env_count` elements. Nothing is retained after this call returns.
 #[no_mangle]
-pub unsafe extern "C" fn newt_session_new(
-    cols: u16,
-    rows: u16,
-    shell: *const c_char,
-    cwd: *const c_char,
-    scrollback_lines: u32,
-) -> *mut NewtSession {
+pub unsafe extern "C" fn newt_session_open(spec: *const NewtSessionSpec) -> *mut NewtSession {
     clear_last_error();
 
     let result = catch_unwind(AssertUnwindSafe(|| {
-        if cols == 0 || rows == 0 {
+        if spec.is_null() {
+            set_last_error("session spec must not be null");
+            return std::ptr::null_mut();
+        }
+        let spec = &*spec;
+
+        if spec.cols == 0 || spec.rows == 0 {
             set_last_error("terminal size must be at least 1x1");
             return std::ptr::null_mut();
         }
 
-        let shell = match optional_string(shell) {
-            Ok(value) => value,
-            Err(message) => {
-                set_last_error(message);
-                return std::ptr::null_mut();
-            }
-        };
-        let cwd = match optional_string(cwd) {
-            Ok(value) => value.map(PathBuf::from),
-            Err(message) => {
-                set_last_error(message);
-                return std::ptr::null_mut();
-            }
-        };
+        macro_rules! text {
+            ($slice:expr, $what:literal) => {
+                match bytes_to_string($slice) {
+                    Ok(value) => value,
+                    Err(_) => {
+                        set_last_error(concat!($what, " was not valid UTF-8"));
+                        return std::ptr::null_mut();
+                    }
+                }
+            };
+        }
 
-        let config = SessionConfig {
-            size: SizeInCells::new(cols, rows),
-            shell,
-            cwd,
-            scrollback_lines: scrollback_lines as usize,
+        let program = text!(spec.program, "program");
+        let cwd = text!(spec.cwd, "cwd");
+        let term = text!(spec.term, "term");
+
+        let mut args = Vec::with_capacity(spec.arg_count);
+        for index in 0..spec.arg_count {
+            if spec.args.is_null() {
+                set_last_error("arg_count is non-zero but args is null");
+                return std::ptr::null_mut();
+            }
+            args.push(match bytes_to_string(*spec.args.add(index)) {
+                // An argument may be deliberately empty, so a missing value is
+                // still an argument — unlike the optional fields above.
+                Ok(value) => value.unwrap_or_default(),
+                Err(_) => {
+                    set_last_error("argument was not valid UTF-8");
+                    return std::ptr::null_mut();
+                }
+            });
+        }
+
+        let mut env = Vec::with_capacity(spec.env_count);
+        for index in 0..spec.env_count {
+            if spec.env.is_null() {
+                set_last_error("env_count is non-zero but env is null");
+                return std::ptr::null_mut();
+            }
+            let entry = *spec.env.add(index);
+            let key = match bytes_to_string(entry.key) {
+                Ok(Some(key)) => key,
+                Ok(None) => {
+                    set_last_error("environment variable name must not be empty");
+                    return std::ptr::null_mut();
+                }
+                Err(_) => {
+                    set_last_error("environment variable name was not valid UTF-8");
+                    return std::ptr::null_mut();
+                }
+            };
+            let value = match bytes_to_string(entry.value) {
+                Ok(value) => value.unwrap_or_default(),
+                Err(_) => {
+                    set_last_error("environment variable value was not valid UTF-8");
+                    return std::ptr::null_mut();
+                }
+            };
+            env.push((key, value));
+        }
+
+        let mut config = SessionConfig {
+            size: SizeInCells::new(spec.cols, spec.rows),
+            shell: program,
+            args,
+            env,
+            cwd: cwd.map(PathBuf::from),
+            scrollback_lines: spec.scrollback_lines as usize,
             ..SessionConfig::default()
         };
+        if let Some(term) = term {
+            config.term = term;
+        }
 
         match CoreSession::spawn(config) {
             Ok(session) => Box::into_raw(Box::new(NewtSession {
@@ -340,6 +447,72 @@ pub unsafe extern "C" fn newt_session_new(
         set_last_error("panic while starting the session");
         std::ptr::null_mut()
     })
+}
+
+/// Start a session with the login shell, or a named program and no arguments.
+///
+/// A convenience over [`newt_session_open`], kept because most callers want a
+/// plain shell and should not have to build a spec to say so.
+///
+/// Returns null on failure; see [`newt_last_error`].
+///
+/// # Safety
+///
+/// `shell` and `cwd`, when non-null, must point to NUL-terminated strings.
+#[no_mangle]
+pub unsafe extern "C" fn newt_session_new(
+    cols: u16,
+    rows: u16,
+    shell: *const c_char,
+    cwd: *const c_char,
+    scrollback_lines: u32,
+) -> *mut NewtSession {
+    fn slice_of(text: &Option<String>) -> NewtBytes {
+        match text {
+            Some(text) => NewtBytes {
+                ptr: text.as_ptr(),
+                len: text.len(),
+            },
+            None => NewtBytes {
+                ptr: std::ptr::null(),
+                len: 0,
+            },
+        }
+    }
+
+    clear_last_error();
+
+    let shell = match optional_string(shell) {
+        Ok(value) => value,
+        Err(message) => {
+            set_last_error(message);
+            return std::ptr::null_mut();
+        }
+    };
+    let cwd = match optional_string(cwd) {
+        Ok(value) => value,
+        Err(message) => {
+            set_last_error(message);
+            return std::ptr::null_mut();
+        }
+    };
+
+    let spec = NewtSessionSpec {
+        cols,
+        rows,
+        scrollback_lines,
+        program: slice_of(&shell),
+        args: std::ptr::null(),
+        arg_count: 0,
+        env: std::ptr::null(),
+        env_count: 0,
+        cwd: slice_of(&cwd),
+        term: NewtBytes {
+            ptr: std::ptr::null(),
+            len: 0,
+        },
+    };
+    newt_session_open(&spec)
 }
 
 /// Release a session. Passing null is a no-op; passing the same handle twice is
@@ -891,6 +1064,20 @@ unsafe fn with_session(handle: *mut NewtSession, f: impl FnOnce(&mut NewtSession
     })
 }
 
+/// Read a borrowed byte slice, rejecting invalid UTF-8 rather than guessing.
+///
+/// An empty slice reads as `None` — the boundary's way of saying "not
+/// supplied", so a caller can zero the field it does not care about.
+unsafe fn bytes_to_string(bytes: NewtBytes) -> Result<Option<String>, &'static str> {
+    if bytes.ptr.is_null() || bytes.len == 0 {
+        return Ok(None);
+    }
+    match std::str::from_utf8(std::slice::from_raw_parts(bytes.ptr, bytes.len)) {
+        Ok(value) => Ok(Some(value.to_string())),
+        Err(_) => Err("value was not valid UTF-8"),
+    }
+}
+
 /// Read an optional C string, rejecting invalid UTF-8 rather than guessing.
 unsafe fn optional_string(pointer: *const c_char) -> Result<Option<String>, &'static str> {
     if pointer.is_null() {
@@ -953,6 +1140,174 @@ mod tests {
 
             assert!(found, "typed keys never reached the child");
             newt_session_free(handle);
+        }
+    }
+
+    /// Build a `NewtBytes` borrowing `text`.
+    ///
+    /// Only valid while `text` outlives the spec, which is what every caller
+    /// of this ABI has to arrange anyway.
+    fn slice(text: &str) -> NewtBytes {
+        NewtBytes {
+            ptr: text.as_ptr(),
+            len: text.len(),
+        }
+    }
+
+    fn empty() -> NewtBytes {
+        NewtBytes {
+            ptr: std::ptr::null(),
+            len: 0,
+        }
+    }
+
+    /// Read the grid until it contains `needle`, or give up.
+    unsafe fn wait_for_text(handle: *mut NewtSession, needle: &str) -> bool {
+        let mut snapshot = std::mem::zeroed::<NewtSnapshot>();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            assert!(newt_session_snapshot(handle, &mut snapshot));
+            let cells = std::slice::from_raw_parts(snapshot.cells, snapshot.cell_count);
+            let text: String = cells
+                .iter()
+                .filter_map(|cell| char::from_u32(cell.codepoint))
+                .collect();
+            if text.contains(needle) {
+                return true;
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn a_spec_carries_arguments_and_environment_across_the_boundary() {
+        unsafe {
+            let program = "/bin/sh";
+            let (dash_c, script) = ("-c", "printf %s \"$NEWT_ABI_VAR\"");
+            let (key, value) = ("NEWT_ABI_VAR", "crossed");
+
+            let args = [slice(dash_c), slice(script)];
+            let env = [NewtEnvVar {
+                key: slice(key),
+                value: slice(value),
+            }];
+
+            let spec = NewtSessionSpec {
+                cols: 40,
+                rows: 8,
+                scrollback_lines: 100,
+                program: slice(program),
+                args: args.as_ptr(),
+                arg_count: args.len(),
+                env: env.as_ptr(),
+                env_count: env.len(),
+                cwd: empty(),
+                term: empty(),
+            };
+
+            let handle = newt_session_open(&spec);
+            assert!(!handle.is_null(), "spec was rejected");
+            assert!(wait_for_text(handle, "crossed"), "argv or env was dropped");
+            newt_session_free(handle);
+        }
+    }
+
+    #[test]
+    fn a_spec_can_set_term() {
+        unsafe {
+            let args = [slice("-c"), slice("printf %s \"$TERM\"")];
+            let spec = NewtSessionSpec {
+                cols: 40,
+                rows: 8,
+                scrollback_lines: 100,
+                program: slice("/bin/sh"),
+                args: args.as_ptr(),
+                arg_count: args.len(),
+                env: std::ptr::null(),
+                env_count: 0,
+                cwd: empty(),
+                term: slice("newt-test-term"),
+            };
+
+            let handle = newt_session_open(&spec);
+            assert!(!handle.is_null());
+            assert!(wait_for_text(handle, "newt-test-term"));
+            newt_session_free(handle);
+        }
+    }
+
+    #[test]
+    fn malformed_specs_are_rejected_rather_than_dereferenced() {
+        unsafe {
+            assert!(newt_session_open(std::ptr::null()).is_null());
+
+            let base = NewtSessionSpec {
+                cols: 40,
+                rows: 8,
+                scrollback_lines: 100,
+                program: slice("/bin/sh"),
+                args: std::ptr::null(),
+                arg_count: 0,
+                env: std::ptr::null(),
+                env_count: 0,
+                cwd: empty(),
+                term: empty(),
+            };
+
+            // A count without the array behind it is the mistake most likely to
+            // reach this boundary from a hand-written caller.
+            let dangling = NewtSessionSpec {
+                arg_count: 2,
+                ..base
+            };
+            assert!(newt_session_open(&dangling).is_null());
+            assert!(!newt_last_error().is_null());
+
+            let no_env_array = NewtSessionSpec {
+                env_count: 1,
+                ..base
+            };
+            assert!(newt_session_open(&no_env_array).is_null());
+
+            let zero_size = NewtSessionSpec { cols: 0, ..base };
+            assert!(newt_session_open(&zero_size).is_null());
+
+            // An unnamed variable cannot be set, and silently dropping it would
+            // leave the child missing something the caller believes it has.
+            let nameless = [NewtEnvVar {
+                key: empty(),
+                value: slice("orphan"),
+            }];
+            let bad_env = NewtSessionSpec {
+                env: nameless.as_ptr(),
+                env_count: 1,
+                ..base
+            };
+            assert!(newt_session_open(&bad_env).is_null());
+        }
+    }
+
+    #[test]
+    fn invalid_utf8_in_a_spec_is_rejected() {
+        unsafe {
+            let raw = [0x66u8, 0xff, 0x66];
+            let spec = NewtSessionSpec {
+                cols: 40,
+                rows: 8,
+                scrollback_lines: 100,
+                program: NewtBytes {
+                    ptr: raw.as_ptr(),
+                    len: raw.len(),
+                },
+                args: std::ptr::null(),
+                arg_count: 0,
+                env: std::ptr::null(),
+                env_count: 0,
+                cwd: empty(),
+                term: empty(),
+            };
+            assert!(newt_session_open(&spec).is_null());
         }
     }
 

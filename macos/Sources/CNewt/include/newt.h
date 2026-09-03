@@ -125,6 +125,55 @@
 // A running terminal session. Opaque to C.
 typedef struct NewtSession NewtSession;
 
+// Start a session running `shell` (null for the user's login shell) in `cwd`
+// (null for the process working directory).
+//
+// A borrowed byte slice.
+//
+// Length-prefixed rather than NUL-terminated, matching
+// [`newt_session_write`] and [`newt_session_send_text`]: the boundary deals in
+// bytes with an explicit length everywhere else, and a shell argument may
+// legitimately contain anything but NUL.
+//
+// An empty slice — null pointer or zero length — means "not supplied", and
+// each field below says what that defaults to.
+typedef struct {
+  const uint8_t *ptr;
+  uintptr_t len;
+} NewtBytes;
+
+// One environment variable.
+typedef struct {
+  NewtBytes key;
+  NewtBytes value;
+} NewtEnvVar;
+
+// Everything needed to start a session.
+//
+// A struct rather than a longer parameter list. `newt_session_new` already
+// took five positionals and needed four more; adding them one at a time is how
+// an ABI rots, and it makes every call site a row of unlabelled arguments.
+// One call taking plain data is narrower in spirit than a wide signature —
+// still no callbacks, no object graph, and no platform types.
+typedef struct {
+  uint16_t cols;
+  uint16_t rows;
+  uint32_t scrollback_lines;
+  // Program to run. Empty means the user's login shell.
+  NewtBytes program;
+  // Arguments, excluding argv[0]. May be null when `arg_count` is zero.
+  const NewtBytes *args;
+  uintptr_t arg_count;
+  // Variables added to the inherited environment, overriding on collision.
+  // May be null when `env_count` is zero.
+  const NewtEnvVar *env;
+  uintptr_t env_count;
+  // Working directory. Empty means this process's.
+  NewtBytes cwd;
+  // Value advertised as `TERM`. Empty means `xterm-256color`.
+  NewtBytes term;
+} NewtSessionSpec;
+
 // An opaque RGB triple. Alpha is deliberately absent: terminal cells are
 // opaque, and window transparency is a shell concern.
 typedef struct {
@@ -224,8 +273,22 @@ const char *newt_version(void);
 // Valid until the next failing call on the same thread.
 const char *newt_last_error(void);
 
-// Start a session running `shell` (null for the user's login shell) in `cwd`
-// (null for the process working directory).
+// Start a session.
+//
+// Returns null on failure; see [`newt_last_error`].
+//
+// # Safety
+//
+// `spec` must be non-null and point to a fully initialised
+// [`NewtSessionSpec`]. Every byte slice it names must either be empty or point
+// to `len` readable bytes, and `args`/`env` must point to `arg_count`/
+// `env_count` elements. Nothing is retained after this call returns.
+NewtSession *newt_session_open(const NewtSessionSpec *spec);
+
+// Start a session with the login shell, or a named program and no arguments.
+//
+// A convenience over [`newt_session_open`], kept because most callers want a
+// plain shell and should not have to build a spec to say so.
 //
 // Returns null on failure; see [`newt_last_error`].
 //

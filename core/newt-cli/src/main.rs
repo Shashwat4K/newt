@@ -6,6 +6,11 @@
 //!     cargo run -p newt-cli -- "ls -1 | head -3"
 //!     cargo run -p newt-cli -- --cols 100 --rows 30 "echo hi"
 //!     cargo run -p newt-cli -- --shell /bin/sh "echo hi"
+//!
+//! Everything after a bare `--` is a program and its arguments, run directly
+//! instead of typed at a shell prompt:
+//!
+//!     cargo run -p newt-cli -- --env FOO=bar -- /bin/sh -c 'echo $FOO'
 
 use std::time::{Duration, Instant};
 
@@ -29,11 +34,16 @@ fn main() {
         keys,
         resize_to,
         shell,
+        program_args,
+        env,
+        exec_mode,
     } = parse_args(&args);
 
     let config = SessionConfig {
         size,
         shell,
+        args: program_args,
+        env,
         ..SessionConfig::default()
     };
 
@@ -63,11 +73,16 @@ fn main() {
     // entirely when the point is to test newt rather than someone's dotfiles.
     settle(&session, WaitFor::FirstOutput, quiet_period);
 
-    if let Err(e) = session.write(format!("{command}\n").as_bytes()) {
-        eprintln!("newt: {e}");
-        std::process::exit(1);
+    // With an explicit program there is no prompt to type at — it is already
+    // running the thing under test, and typing would send the command into
+    // whatever it is doing.
+    if !exec_mode {
+        if let Err(e) = session.write(format!("{command}\n").as_bytes()) {
+            eprintln!("newt: {e}");
+            std::process::exit(1);
+        }
+        settle(&session, WaitFor::Quiet, quiet_period);
     }
-    settle(&session, WaitFor::Quiet, quiet_period);
 
     // Typed steps go through the key-encoding path rather than raw writes, so
     // `--trace` shows exactly what a keystroke puts on the wire.
@@ -192,6 +207,12 @@ struct Args {
     /// for a driver of a real terminal; pass `--shell /bin/sh` for a run that
     /// must not depend on the invoking user's configuration.
     shell: Option<String>,
+    /// Arguments for the program, excluding argv[0].
+    program_args: Vec<String>,
+    /// Variables added to the child's inherited environment.
+    env: Vec<(String, String)>,
+    /// True when a bare `--` named the program, so nothing is typed at it.
+    exec_mode: bool,
 }
 
 fn parse_args(args: &[String]) -> Args {
@@ -203,6 +224,9 @@ fn parse_args(args: &[String]) -> Args {
     let mut keys: Vec<String> = Vec::new();
     let mut resize_to: Option<SizeInCells> = None;
     let mut shell: Option<String> = None;
+    let mut program_args: Vec<String> = Vec::new();
+    let mut env: Vec<(String, String)> = Vec::new();
+    let mut exec_mode = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -225,6 +249,26 @@ fn parse_args(args: &[String]) -> Args {
             "--shell" => {
                 shell = args.get(i + 1).cloned();
                 i += 2;
+            }
+            "--env" => {
+                // KEY=VALUE, split at the first `=` so a value may contain one.
+                if let Some((key, value)) = args.get(i + 1).and_then(|v| v.split_once('=')) {
+                    env.push((key.to_string(), value.to_string()));
+                }
+                i += 2;
+            }
+            // Everything after a bare `--` is the program and its arguments.
+            // Consuming the rest unconditionally is safe here precisely because
+            // this marker says so — unlike `--keys`, which must stop at the
+            // next flag.
+            "--" => {
+                let rest = &args[(i + 1)..];
+                if let Some((first, remainder)) = rest.split_first() {
+                    shell = Some(first.clone());
+                    program_args = remainder.to_vec();
+                    exec_mode = true;
+                }
+                i = args.len();
             }
             "--trace" => {
                 trace = true;
@@ -265,5 +309,8 @@ fn parse_args(args: &[String]) -> Args {
         keys,
         resize_to,
         shell,
+        program_args,
+        env,
+        exec_mode,
     }
 }

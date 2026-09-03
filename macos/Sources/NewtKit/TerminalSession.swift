@@ -12,31 +12,43 @@ public final class TerminalSession {
     /// The raw ABI handle, for the input extensions in this module.
     var rawHandle: OpaquePointer { handle }
 
-    /// Start a session.
+    /// Start a session from a full spec: program, arguments, environment, cwd.
+    ///
+    /// This is the general constructor. Running an agent CLI needs it — an
+    /// argument list cannot be expressed any other way.
+    public init(spec: SessionSpec) throws {
+        let created = spec.withNativeSpec { newt_session_open($0) }
+
+        guard let created else {
+            throw TerminalError.lastError(fallback: "could not start the terminal session")
+        }
+        handle = created
+    }
+
+    /// Start a session running a program with no arguments, or the login shell.
+    ///
+    /// The common case, kept as a convenience so a plain terminal tab does not
+    /// have to build a spec to say "just give me a shell".
     ///
     /// - Parameters:
     ///   - size: initial grid size in cells.
     ///   - shell: program to run; nil uses the user's login shell.
     ///   - workingDirectory: nil uses the process working directory.
     ///   - scrollbackLines: lines of history to retain.
-    public init(
+    public convenience init(
         size: TerminalSize,
         shell: String? = nil,
         workingDirectory: String? = nil,
         scrollbackLines: UInt32 = 10_000
     ) throws {
-        // withCString nests rather than composes, so the optional paths are
-        // handled by recursing through a small helper.
-        let created = Self.withOptionalCString(shell) { shellPointer in
-            Self.withOptionalCString(workingDirectory) { cwdPointer in
-                newt_session_new(size.cols, size.rows, shellPointer, cwdPointer, scrollbackLines)
-            }
-        }
-
-        guard let created else {
-            throw TerminalError.lastError(fallback: "could not start the terminal session")
-        }
-        handle = created
+        try self.init(
+            spec: SessionSpec(
+                size: size,
+                program: shell,
+                workingDirectory: workingDirectory,
+                scrollbackLines: scrollbackLines
+            )
+        )
     }
 
     deinit {

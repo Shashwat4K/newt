@@ -51,6 +51,17 @@ pub struct SessionConfig {
     pub size: SizeInCells,
     /// Program to run. `None` uses the user's login shell.
     pub shell: Option<String>,
+    /// Arguments for `shell`, excluding argv[0].
+    ///
+    /// A login shell takes none; running an agent CLI is the reason this
+    /// exists — `claude --settings <path>` cannot be expressed without it.
+    pub args: Vec<String>,
+    /// Variables added to the inherited environment.
+    ///
+    /// Added, not replaced: `CommandBuilder::new` seeds itself from this
+    /// process's environment, so a child still sees `PATH`, `HOME`, and the
+    /// rest. Entries here override an inherited variable of the same name.
+    pub env: Vec<(String, String)>,
     pub cwd: Option<PathBuf>,
     pub scrollback_lines: usize,
     /// Value advertised as `TERM`.
@@ -62,6 +73,8 @@ impl Default for SessionConfig {
         Self {
             size: SizeInCells::new(80, 24),
             shell: None,
+            args: Vec::new(),
+            env: Vec::new(),
             cwd: None,
             scrollback_lines: DEFAULT_SCROLLBACK_LINES,
             term: "xterm-256color".to_string(),
@@ -97,7 +110,12 @@ impl Session {
             .map_err(|e| Error::Pty(format!("openpty failed: {e}")))?;
 
         let mut cmd = CommandBuilder::new(config.shell.clone().unwrap_or_else(default_shell));
+        cmd.args(&config.args);
         cmd.env("TERM", &config.term);
+        // After TERM, so a caller can deliberately override it.
+        for (key, value) in &config.env {
+            cmd.env(key, value);
+        }
         if let Some(cwd) = &config.cwd {
             cmd.cwd(cwd);
         }
@@ -375,4 +393,85 @@ fn pty_size(size: SizeInCells) -> PtySize {
 
 fn default_shell() -> String {
     std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use super::*;
+
+    /// Run a program to completion and return what it left on the screen.
+    ///
+    /// `/bin/sh` rather than the login shell: these assert what newt puts on
+    /// the command line, and a test that inherits the running user's dotfiles
+    /// is testing the dotfiles.
+    fn screen_after(config: SessionConfig) -> String {
+        let session = Session::spawn(config).expect("spawn");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            let text = session.with_emulator(|emulator| emulator.visible_string());
+            if !text.trim().is_empty() {
+                return text;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        session.with_emulator(|emulator| emulator.visible_string())
+    }
+
+    #[test]
+    fn arguments_and_environment_reach_the_child() {
+        // Both in one program, because the failure this guards against is the
+        // whole command line being dropped rather than one half of it: before
+        // this, `spawn_with_trace` had no `.arg()` call at all.
+        let screen = screen_after(SessionConfig {
+            shell: Some("/bin/sh".to_string()),
+            args: vec!["-c".to_string(), "printf %s \"$NEWT_TEST_VAR\"".to_string()],
+            env: vec![("NEWT_TEST_VAR".to_string(), "reached".to_string())],
+            ..SessionConfig::default()
+        });
+
+        assert!(screen.contains("reached"), "screen was {screen:?}");
+    }
+
+    #[test]
+    fn the_child_still_inherits_the_environment_it_was_not_given() {
+        // `CommandBuilder::new` seeds from this process's environment, so
+        // adding a variable must not replace the rest. A child with no PATH or
+        // HOME breaks in ways that look nothing like a terminal bug.
+        let screen = screen_after(SessionConfig {
+            shell: Some("/bin/sh".to_string()),
+            args: vec!["-c".to_string(), "printf %s \"${HOME:-missing}\"".to_string()],
+            env: vec![("NEWT_UNRELATED".to_string(), "1".to_string())],
+            ..SessionConfig::default()
+        });
+
+        assert!(!screen.contains("missing"), "screen was {screen:?}");
+    }
+
+    #[test]
+    fn explicit_environment_wins_over_the_default_term() {
+        // TERM is set first so a caller can deliberately override it; pinning
+        // the order here because reversing it would be invisible until some
+        // program misdetected the terminal.
+        let screen = screen_after(SessionConfig {
+            shell: Some("/bin/sh".to_string()),
+            args: vec!["-c".to_string(), "printf %s \"$TERM\"".to_string()],
+            env: vec![("TERM".to_string(), "dumb".to_string())],
+            ..SessionConfig::default()
+        });
+
+        assert!(screen.contains("dumb"), "screen was {screen:?}");
+    }
+
+    #[test]
+    fn no_arguments_is_a_plain_shell() {
+        let session = Session::spawn(SessionConfig {
+            shell: Some("/bin/sh".to_string()),
+            ..SessionConfig::default()
+        })
+        .expect("spawn");
+        assert!(!session.has_exited());
+    }
 }
