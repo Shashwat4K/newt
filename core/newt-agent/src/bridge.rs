@@ -27,6 +27,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use crate::ipc;
+use crate::transcript::TranscriptReader;
 use crate::update::MetadataUpdate;
 
 /// Where a session's pending updates collect until it reads them.
@@ -34,13 +35,31 @@ pub type Mailbox = Arc<Mutex<MetadataUpdate>>;
 
 /// How often the accept loop checks whether it has been asked to stop.
 const ACCEPT_POLL: Duration = Duration::from_millis(100);
+/// How often each attached transcript is checked for new lines.
+///
+/// Slower than the sidebar's own 5 Hz: this reads a file, and titles and token
+/// totals are not worth more than a few checks a second.
+const TAIL_POLL: Duration = Duration::from_millis(400);
+
+/// One registered session: where its reports go, and what it is writing.
+struct SessionEntry {
+    mailbox: Mailbox,
+    /// Set once `SessionStart` says where the transcript is.
+    ///
+    /// Behind its own lock so the tailer can read a file without holding the
+    /// session map, which the accept thread needs to deliver hooks.
+    reader: Arc<Mutex<Option<TranscriptReader>>>,
+}
+
+type Sessions = Arc<Mutex<HashMap<String, SessionEntry>>>;
 
 /// The process-wide hook listener.
 pub struct AgentBridge {
     socket_path: PathBuf,
-    sessions: Arc<Mutex<HashMap<String, Mailbox>>>,
+    sessions: Sessions,
     stop: Arc<AtomicBool>,
     listener: Mutex<Option<std::thread::JoinHandle<()>>>,
+    tailer: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 static SHARED: OnceLock<Option<AgentBridge>> = OnceLock::new();
@@ -75,15 +94,17 @@ impl AgentBridge {
         let socket_path = directory.join(format!("{}.sock", nonce()));
         ipc::check_socket_path(&socket_path)?;
 
-        let sessions: Arc<Mutex<HashMap<String, Mailbox>>> = Arc::new(Mutex::new(HashMap::new()));
+        let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
         let stop = Arc::new(AtomicBool::new(false));
         let listener = spawn_listener(&socket_path, Arc::clone(&sessions), Arc::clone(&stop))?;
+        let tailer = spawn_tailer(Arc::clone(&sessions), Arc::clone(&stop));
 
         Ok(Self {
             socket_path,
             sessions,
             stop,
             listener: Mutex::new(Some(listener)),
+            tailer: Mutex::new(Some(tailer)),
         })
     }
 
@@ -95,7 +116,13 @@ impl AgentBridge {
     pub fn register(&self, token: impl Into<String>) -> Mailbox {
         let mailbox: Mailbox = Arc::new(Mutex::new(MetadataUpdate::default()));
         if let Ok(mut sessions) = self.sessions.lock() {
-            sessions.insert(token.into(), Arc::clone(&mailbox));
+            sessions.insert(
+                token.into(),
+                SessionEntry {
+                    mailbox: Arc::clone(&mailbox),
+                    reader: Arc::new(Mutex::new(None)),
+                },
+            );
         }
         mailbox
     }
@@ -112,10 +139,16 @@ impl AgentBridge {
     }
 
     pub fn stop(&self) {
+        self.shut_down();
+    }
+
+    fn shut_down(&self) {
         self.stop.store(true, Ordering::Release);
-        if let Ok(mut handle) = self.listener.lock() {
-            if let Some(handle) = handle.take() {
-                let _ = handle.join();
+        for handle in [&self.listener, &self.tailer] {
+            if let Ok(mut handle) = handle.lock() {
+                if let Some(handle) = handle.take() {
+                    let _ = handle.join();
+                }
             }
         }
         let _ = std::fs::remove_file(&self.socket_path);
@@ -124,20 +157,51 @@ impl AgentBridge {
 
 impl Drop for AgentBridge {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Release);
-        if let Ok(mut handle) = self.listener.lock() {
-            if let Some(handle) = handle.take() {
-                let _ = handle.join();
+        self.shut_down();
+    }
+}
+
+/// Poll every attached transcript, folding what it says into its mailbox.
+///
+/// One thread for all sessions rather than one per tab: a poll is a `stat` and
+/// usually nothing else, and twenty idle agent tabs should not cost twenty
+/// sleeping threads.
+fn spawn_tailer(sessions: Sessions, stop: Arc<AtomicBool>) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        while !stop.load(Ordering::Acquire) {
+            std::thread::sleep(TAIL_POLL);
+
+            // The map is locked only long enough to copy the handles out.
+            // Reading a transcript under that lock would block hook delivery
+            // for as long as the read takes.
+            let attached: Vec<(Mailbox, Arc<Mutex<Option<TranscriptReader>>>)> =
+                match sessions.lock() {
+                    Ok(sessions) => sessions
+                        .values()
+                        .map(|entry| (Arc::clone(&entry.mailbox), Arc::clone(&entry.reader)))
+                        .collect(),
+                    Err(_) => break,
+                };
+
+            for (mailbox, reader) in attached {
+                let update = match reader.lock() {
+                    Ok(mut reader) => reader.as_mut().and_then(TranscriptReader::poll),
+                    Err(_) => None,
+                };
+                if let Some(update) = update {
+                    if let Ok(mut pending) = mailbox.lock() {
+                        pending.merge(update);
+                    }
+                }
             }
         }
-        let _ = std::fs::remove_file(&self.socket_path);
-    }
+    })
 }
 
 #[cfg(unix)]
 fn spawn_listener(
     socket_path: &std::path::Path,
-    sessions: Arc<Mutex<HashMap<String, Mailbox>>>,
+    sessions: Sessions,
     stop: Arc<AtomicBool>,
 ) -> io::Result<std::thread::JoinHandle<()>> {
     use std::os::unix::net::UnixListener;
@@ -175,7 +239,7 @@ fn spawn_listener(
 #[cfg(not(unix))]
 fn spawn_listener(
     _socket_path: &std::path::Path,
-    _sessions: Arc<Mutex<HashMap<String, Mailbox>>>,
+    _sessions: Sessions,
     _stop: Arc<AtomicBool>,
 ) -> io::Result<std::thread::JoinHandle<()>> {
     // Windows wants a named pipe. Absorbed here, never exposed through the ABI.
@@ -186,7 +250,7 @@ fn spawn_listener(
 }
 
 /// Parse a payload and fold it into the session's mailbox.
-fn deliver(sessions: &Arc<Mutex<HashMap<String, Mailbox>>>, token: &[u8], payload: &[u8]) {
+fn deliver(sessions: &Sessions, token: &[u8], payload: &[u8]) {
     let Ok(token) = std::str::from_utf8(token) else {
         return;
     };
@@ -194,18 +258,44 @@ fn deliver(sessions: &Arc<Mutex<HashMap<String, Mailbox>>>, token: &[u8], payloa
         return;
     };
 
-    let mailbox = match sessions.lock() {
+    let entry = match sessions.lock() {
         // Cloned out so the map is not held while touching the mailbox, which
         // the owning session may be reading at the same moment.
-        Ok(sessions) => sessions.get(token).map(Arc::clone),
+        Ok(sessions) => sessions
+            .get(token)
+            .map(|entry| (Arc::clone(&entry.mailbox), Arc::clone(&entry.reader))),
         Err(_) => None,
     };
+    let Some((mailbox, reader)) = entry else {
+        return;
+    };
 
-    if let Some(mailbox) = mailbox {
-        if let Ok(mut pending) = mailbox.lock() {
-            pending.merge(outcome.update);
+    // `SessionStart` is what says where the transcript is, and a fork or a
+    // `/clear` names a different one. Switching files starts a fresh reader
+    // rather than seeking an old offset into new content.
+    if let Some(path) = &outcome.update.transcript_path {
+        if let Ok(mut reader) = reader.lock() {
+            let changed = reader.as_ref().map(TranscriptReader::path) != Some(path.as_path());
+            if changed {
+                *reader = Some(TranscriptReader::new(path.clone()));
+            }
         }
     }
+
+    if outcome.ended {
+        // The agent is gone; nothing more will be appended.
+        if let Ok(mut reader) = reader.lock() {
+            *reader = None;
+        }
+    }
+
+    // A named binding rather than `if let`: as the block's trailing
+    // expression, an `if let` guard lives until the enclosing block ends,
+    // which is after `mailbox` itself is dropped.
+    let Ok(mut pending) = mailbox.lock() else {
+        return;
+    };
+    pending.merge(outcome.update);
 }
 
 /// Remove sockets left behind by a newt that crashed.
@@ -430,6 +520,85 @@ mod tests {
         std::thread::sleep(Duration::from_millis(200));
 
         assert!(mailbox.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn session_start_attaches_the_transcript_it_names() {
+        // The seam between the hook path and the transcript reader: the hook
+        // says *where* to read, and everything the sidebar shows beyond a
+        // state dot comes from reading it. Neither half is useful alone.
+        let bridge = bridge();
+        let mailbox = bridge.register("tailing");
+
+        let transcript =
+            PathBuf::from(format!("/tmp/newt-tail-{}.jsonl", AgentBridge::new_token()));
+        std::fs::write(
+            &transcript,
+            b"{\"type\":\"ai-title\",\"aiTitle\":\"Reflow tests\"}\n              {\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-5\",\"usage\":{\"output_tokens\":42}}}\n",
+        )
+        .expect("write transcript");
+
+        send(
+            bridge.socket_path(),
+            "tailing",
+            &format!(
+                r#"{{"hook_event_name":"SessionStart","session_id":"s","transcript_path":"{}"}}"#,
+                transcript.display()
+            ),
+        );
+
+        let found = wait_for(&mailbox, |update| {
+            update.agent_title.as_deref() == Some("Reflow tests")
+                && update.model.as_deref() == Some("claude-opus-5")
+                && update.output_tokens == Some(42)
+        });
+
+        let _ = std::fs::remove_file(&transcript);
+        assert!(found, "the transcript named by SessionStart was never read");
+    }
+
+    #[test]
+    fn session_end_stops_the_tailer() {
+        let bridge = bridge();
+        let mailbox = bridge.register("ending");
+
+        let transcript = PathBuf::from(format!("/tmp/newt-end-{}.jsonl", AgentBridge::new_token()));
+        std::fs::write(
+            &transcript,
+            b"{\"type\":\"ai-title\",\"aiTitle\":\"first\"}\n",
+        )
+        .expect("write");
+
+        send(
+            bridge.socket_path(),
+            "ending",
+            &format!(
+                r#"{{"hook_event_name":"SessionStart","transcript_path":"{}"}}"#,
+                transcript.display()
+            ),
+        );
+        assert!(wait_for(&mailbox, |u| u.agent_title.as_deref() == Some("first")));
+
+        send(
+            bridge.socket_path(),
+            "ending",
+            r#"{"hook_event_name":"SessionEnd"}"#,
+        );
+        std::thread::sleep(TAIL_POLL * 2);
+
+        // Appending after the agent has gone must not resurrect the tab: the
+        // file may still be rewritten by other tooling long afterwards.
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&transcript)
+            .expect("open");
+        let _ = file.write_all(b"{\"type\":\"ai-title\",\"aiTitle\":\"later\"}\n");
+        std::thread::sleep(TAIL_POLL * 3);
+
+        let title = mailbox.lock().unwrap().agent_title.clone();
+        let _ = std::fs::remove_file(&transcript);
+        assert_ne!(title.as_deref(), Some("later"));
     }
 
     #[test]

@@ -9,7 +9,10 @@ use std::path::PathBuf;
 
 use serde_json::{json, Value};
 
-use crate::launch::{shell_quote, LaunchPlan, LaunchRequest, HOOK_EVENTS, SOCKET_ENV, TOKEN_ENV};
+use crate::launch::{
+    shell_quote, LaunchPlan, LaunchRequest, CHILD_SESSION_MARKER, HOOK_EVENTS, SOCKET_ENV,
+    TOKEN_ENV,
+};
 
 /// Name of the settings file written into the request's runtime directory.
 pub const SETTINGS_FILE: &str = "settings.json";
@@ -50,6 +53,7 @@ pub fn plan(request: &LaunchRequest) -> std::io::Result<LaunchPlan> {
         program: request.program.to_string_lossy().into_owned(),
         args,
         env,
+        env_remove: vec![CHILD_SESSION_MARKER.to_string()],
         cwd: request.cwd.clone(),
     })
 }
@@ -195,6 +199,19 @@ mod tests {
             plan.args
         );
         let _ = std::fs::remove_dir_all(&request.runtime_dir);
+    }
+
+    #[test]
+    fn the_child_session_marker_is_stripped() {
+        // Inheriting it disables transcript saving, and with it every title,
+        // token count and cost figure the sidebar shows. Verified against a
+        // real session: with the marker the metadata stayed empty; without it
+        // the agent's own title and token totals arrived.
+        let plan = plan(&request("marker")).expect("plan");
+        assert!(plan
+            .env_remove
+            .iter()
+            .any(|key| key == CHILD_SESSION_MARKER));
     }
 
     #[test]

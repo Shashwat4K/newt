@@ -56,12 +56,13 @@ fn main() {
 
     // An agent replaces the program, its arguments, and its environment, so it
     // is resolved before the config rather than merged into one.
-    let (shell, program_args, env, exec_mode, agent_cwd, mailbox) = match &agent {
+    let (shell, program_args, env, env_remove, exec_mode, agent_cwd, mailbox) = match &agent {
         Some(name) => match resolve_agent(name) {
             Ok((plan, mailbox)) => (
                 Some(plan.program),
                 plan.args,
                 plan.env,
+                plan.env_remove,
                 true,
                 plan.cwd,
                 mailbox,
@@ -71,7 +72,7 @@ fn main() {
                 std::process::exit(1);
             }
         },
-        None => (shell, program_args, env, exec_mode, None, None),
+        None => (shell, program_args, env, Vec::new(), exec_mode, None, None),
     };
 
     let config = SessionConfig {
@@ -79,6 +80,7 @@ fn main() {
         shell,
         args: program_args,
         env,
+        env_remove,
         cwd: agent_cwd,
         agent_mailbox: mailbox,
         ..SessionConfig::default()

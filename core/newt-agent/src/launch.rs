@@ -8,6 +8,19 @@ use std::path::{Path, PathBuf};
 
 use crate::kind::AgentKind;
 
+/// Claude Code's marker for "you were started by another Claude Code".
+///
+/// It disables transcript saving in the child, which costs newt every title,
+/// token count and cost figure it would otherwise read. A newt agent tab is a
+/// *new* top-level session, not a child of whatever happened to launch newt,
+/// so the marker is untrue of it and is removed.
+///
+/// This matters in practice rather than in theory: anyone developing newt from
+/// a terminal inside a Claude Code session inherits it, and the symptom is a
+/// sidebar that shows state but never a title — which reads as the transcript
+/// reader being broken.
+pub const CHILD_SESSION_MARKER: &str = "CLAUDE_CODE_CHILD_SESSION";
+
 /// Environment variable naming the socket `newt-hook` reports to.
 pub const SOCKET_ENV: &str = "NEWT_HOOK_SOCKET";
 /// Environment variable identifying which session a hook belongs to.
@@ -64,6 +77,8 @@ pub struct LaunchPlan {
     pub program: String,
     pub args: Vec<String>,
     pub env: Vec<(String, String)>,
+    /// Inherited variables to strip before starting the agent.
+    pub env_remove: Vec<String>,
     /// Directory to start in.
     ///
     /// Carried through rather than left to the caller: an agent's working

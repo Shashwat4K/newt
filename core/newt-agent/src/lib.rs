@@ -30,7 +30,9 @@ pub use launch::{plan, LaunchPlan, LaunchRequest};
 pub mod bridge;
 pub mod hooks;
 pub mod ipc;
+pub mod transcript;
 pub mod update;
 
 pub use bridge::{AgentBridge, Mailbox};
+pub use transcript::TranscriptReader;
 pub use update::{AgentStateHint, MetadataUpdate};

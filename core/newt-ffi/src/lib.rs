@@ -483,6 +483,7 @@ pub unsafe extern "C" fn newt_session_open(spec: *const NewtSessionSpec) -> *mut
                     config.shell = Some(plan.program);
                     config.args = plan.args;
                     config.env = plan.env;
+                    config.env_remove = plan.env_remove;
                     if plan.cwd.is_some() {
                         config.cwd = plan.cwd;
                     }

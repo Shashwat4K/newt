@@ -62,6 +62,12 @@ pub struct SessionConfig {
     /// process's environment, so a child still sees `PATH`, `HOME`, and the
     /// rest. Entries here override an inherited variable of the same name.
     pub env: Vec<(String, String)>,
+    /// Variables to strip from the inherited environment.
+    ///
+    /// Needed because inheritance is the default: some variables say something
+    /// about the *parent* that is untrue of the child, and the only way to
+    /// correct that is to remove them.
+    pub env_remove: Vec<String>,
     pub cwd: Option<PathBuf>,
     pub scrollback_lines: usize,
     /// Value advertised as `TERM`.
@@ -80,6 +86,7 @@ impl Default for SessionConfig {
             shell: None,
             args: Vec::new(),
             env: Vec::new(),
+            env_remove: Vec::new(),
             cwd: None,
             scrollback_lines: DEFAULT_SCROLLBACK_LINES,
             term: "xterm-256color".to_string(),
@@ -123,6 +130,10 @@ impl Session {
         // After TERM, so a caller can deliberately override it.
         for (key, value) in &config.env {
             cmd.env(key, value);
+        }
+        // Last, so removing beats both inheritance and the additions above.
+        for key in &config.env_remove {
+            cmd.env_remove(key);
         }
         if let Some(cwd) = &config.cwd {
             cmd.cwd(cwd);
