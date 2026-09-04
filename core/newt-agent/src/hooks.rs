@@ -40,8 +40,11 @@ pub fn parse(payload: &[u8]) -> Option<HookOutcome> {
         .unwrap_or_default()
         .to_string();
 
+    // Notifications are not all alike, so the kind is needed to interpret one.
+    let notification_type = value.get("notification_type").and_then(Value::as_str);
+
     let mut update = MetadataUpdate {
-        agent_state: state_for(&event),
+        agent_state: state_for(&event, notification_type),
         ..MetadataUpdate::default()
     };
 
@@ -65,26 +68,41 @@ pub fn parse(payload: &[u8]) -> Option<HookOutcome> {
 
 /// The state each event implies.
 ///
-/// The two that are not obvious, and are the reason this is a table rather
-/// than an inline match:
+/// The ones that are not obvious, and are why this is a table rather than an
+/// inline match:
 ///
-/// - **`Notification` is `Waiting`, not `Running`.** This is the event Claude
-///   Code raises when it needs a person — a permission prompt, or idle input.
-///   "Working" and "waiting for you" are the two states someone actually scans
-///   a sidebar for, and collapsing them makes the sidebar useless.
+/// - **A `Notification` is only `Waiting` when it actually wants something.**
+///   Claude Code raises this event for two unrelated situations, and the
+///   payload's `notification_type` is what separates them. `idle_prompt` —
+///   confirmed from a live payload reading *"Claude is waiting for your
+///   input"* — fires a minute or so after a turn ends and means the agent is
+///   idle, not blocked. Treating it as `Waiting` painted finished tabs orange,
+///   which reads as "this one needs rescuing" and, because a stale row only
+///   repainted when something else rebuilt the sidebar, looked like one tab's
+///   indicator responding to another tab's activity.
 /// - **`SubagentStop` is `Running`, not `Idle`.** A subagent finishing does not
 ///   mean the main agent stopped; mapping it to Idle shows a finished tab
 ///   mid-task, which is worse than showing nothing.
 ///
 /// `SessionEnd` reports `Unknown` rather than `Idle`: the agent is gone, and
 /// "no agent has reported" is the honest state for a tab whose agent exited.
-fn state_for(event: &str) -> Option<AgentStateHint> {
+fn state_for(event: &str, notification_type: Option<&str>) -> Option<AgentStateHint> {
     match event {
         "SessionStart" => Some(AgentStateHint::Idle),
         "UserPromptSubmit" | "PreToolUse" | "PostToolUse" | "SubagentStop" => {
             Some(AgentStateHint::Running)
         }
-        "Notification" => Some(AgentStateHint::Waiting),
+        "Notification" => Some(match notification_type {
+            // The agent is asking for a prompt, which is what an idle agent
+            // does. Only this one value is special-cased, because it is the
+            // only one observed in a real payload.
+            Some("idle_prompt") => AgentStateHint::Idle,
+            // Everything else is assumed to want a person — a permission
+            // request being the case that matters. Over-signalling "needs you"
+            // is the safer error: a missed prompt stalls the session silently,
+            // while a spurious one is merely noticed and dismissed.
+            _ => AgentStateHint::Waiting,
+        }),
         "Stop" => Some(AgentStateHint::Idle),
         "SessionEnd" => Some(AgentStateHint::Unknown),
         // An event newt did not register, or one added by a later release.
@@ -110,6 +128,16 @@ mod tests {
         parse(payload(event).as_bytes()).unwrap().update.agent_state
     }
 
+    fn notification_state(kind: Option<&str>) -> Option<AgentStateHint> {
+        let body = match kind {
+            Some(kind) => {
+                format!(r#"{{"hook_event_name":"Notification","notification_type":"{kind}"}}"#)
+            }
+            None => r#"{"hook_event_name":"Notification"}"#.to_string(),
+        };
+        parse(body.as_bytes()).unwrap().update.agent_state
+    }
+
     #[test]
     fn every_registered_event_maps_to_a_state() {
         use AgentStateHint::*;
@@ -117,6 +145,7 @@ mod tests {
         assert_eq!(state_of("UserPromptSubmit"), Some(Running));
         assert_eq!(state_of("PreToolUse"), Some(Running));
         assert_eq!(state_of("PostToolUse"), Some(Running));
+        // Without a type, a notification is assumed to want attention.
         assert_eq!(state_of("Notification"), Some(Waiting));
         assert_eq!(state_of("Stop"), Some(Idle));
         assert_eq!(state_of("SessionEnd"), Some(Unknown));
@@ -137,12 +166,41 @@ mod tests {
     }
 
     #[test]
+    fn an_idle_prompt_notification_leaves_the_tab_idle() {
+        // Observed live: after a turn ends, Claude Code sends
+        // {"notification_type":"idle_prompt","message":"Claude is waiting for
+        // your input"}. That is a finished session, not a blocked one, and
+        // showing it as blocked is what made a completed tab pulse for
+        // attention it did not need.
+        assert_eq!(
+            notification_state(Some("idle_prompt")),
+            Some(AgentStateHint::Idle)
+        );
+    }
+
+    #[test]
+    fn any_other_notification_still_asks_for_a_person() {
+        // The permission-request case, and anything a later release adds.
+        // Defaulting to Waiting means a new notification kind is noticed rather
+        // than silently ignored.
+        assert_eq!(
+            notification_state(Some("permission_request")),
+            Some(AgentStateHint::Waiting)
+        );
+        assert_eq!(
+            notification_state(Some("something_new")),
+            Some(AgentStateHint::Waiting)
+        );
+        assert_eq!(notification_state(None), Some(AgentStateHint::Waiting));
+    }
+
+    #[test]
     fn the_registered_events_and_the_mapping_agree() {
         // Registering an event newt cannot interpret would leave a tab stuck;
         // interpreting one it never registered is dead code. Both directions.
         for event in crate::launch::HOOK_EVENTS {
             assert!(
-                state_for(event).is_some(),
+                state_for(event, None).is_some(),
                 "{event} is registered but maps to no state"
             );
         }

@@ -149,10 +149,26 @@ final class TerminalTabController: NSObject, NSSplitViewDelegate {
         }
     }
 
-    /// Poll every pane for title changes and exit. Runs for background tabs.
+    /// What the sidebar last drew for this tab, so a change can be noticed.
+    private var lastObservedMetadata = SessionMetadata()
+
+    /// Poll every pane for title changes, exit, and agent state.
+    ///
+    /// Runs for background tabs too, and the metadata half is why this exists
+    /// rather than leaving it to the title. Agent state, tokens and cost do not
+    /// change the terminal title, so before this the row was only repainted
+    /// when the title happened to change or something rebuilt the whole
+    /// sidebar — which made an indicator look like it belonged to whichever
+    /// tab was touched last, rather than to its own session.
     func pollStatus() {
         for pane in panes {
             pane.pollStatus()
+        }
+
+        let current = focusedPane?.session.metadata ?? SessionMetadata()
+        if current != lastObservedMetadata {
+            lastObservedMetadata = current
+            onStatusChange?(self)
         }
     }
 

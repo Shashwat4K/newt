@@ -258,6 +258,18 @@ fn deliver(sessions: &Sessions, token: &[u8], payload: &[u8]) {
         return;
     };
 
+    // Which session was told what. Off unless asked for: the alternative when
+    // an indicator misbehaves is guessing whether the routing or the display
+    // is at fault, and those have completely different fixes.
+    if std::env::var_os("NEWT_AGENT_TRACE").is_some() {
+        eprintln!(
+            "[newt-agent] token={token} event={} state={:?} payload={}",
+            outcome.event,
+            outcome.update.agent_state,
+            String::from_utf8_lossy(payload)
+        );
+    }
+
     let entry = match sessions.lock() {
         // Cloned out so the map is not held while touching the mailbox, which
         // the owning session may be reading at the same moment.
