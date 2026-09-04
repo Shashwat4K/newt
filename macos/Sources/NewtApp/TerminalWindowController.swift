@@ -248,13 +248,26 @@ final class TerminalWindowController: NSWindowController, NSWindowDelegate {
         case .agent(let agent):
             return SessionSpec(
                 size: defaultSize,
-                workingDirectory: FileManager.default.currentDirectoryPath,
+                workingDirectory: Self.startingDirectory,
                 agent: agent,
                 agentHelperPath: Self.hookHelperPath,
                 agentResumeID: parent
             )
         }
     }
+
+    /// Where a new agent session starts.
+    ///
+    /// An agent's working directory is the project it operates on, so this
+    /// matters more than it does for a shell. A bundle launched from Finder
+    /// inherits `/` as its working directory, and an agent started there asks
+    /// to be trusted with the whole filesystem — which reads as newt being
+    /// broken. Home is what Terminal.app opens in, and is the right answer
+    /// whenever the process directory is not a real one.
+    static let startingDirectory: String = {
+        let current = FileManager.default.currentDirectoryPath
+        return current == "/" || current.isEmpty ? NSHomeDirectory() : current
+    }()
 
     /// The bundled `newt-hook`, beside this executable.
     ///
