@@ -1,4 +1,5 @@
 import AppKit
+import CNewt
 import Foundation
 import NewtKit
 
@@ -36,7 +37,7 @@ final class TerminalWindowController: NSWindowController, NSWindowDelegate {
 
     /// Grid size used for tabs and panes created after the first.
     private let defaultSize: TerminalSize
-    /// Program every tab in this window runs. `nil` is the user's login shell.
+    /// Program plain shell tabs in this window run. `nil` is the login shell.
     private let shell: String?
 
     private static let sidebarWidth: CGFloat = 208
@@ -204,7 +205,7 @@ final class TerminalWindowController: NSWindowController, NSWindowDelegate {
             kind: kind,
             font: font,
             size: currentGridSize(),
-            shell: shell
+            spec: sessionSpec(for: kind)
         )
         tabs[id] = controller
         tree.insert(kind: kind, under: parent, id: id)
@@ -233,6 +234,40 @@ final class TerminalWindowController: NSWindowController, NSWindowDelegate {
         }
         return id
     }
+
+    /// What a tab of this kind should run.
+    ///
+    /// The agent case names only the *kind* and where the helper lives; the
+    /// core resolves the executable, writes the hooks settings, and builds the
+    /// argument list. Nothing here knows what `--fork-session` means, which is
+    /// the boundary rule doing its job.
+    private func sessionSpec(for kind: TabKind, forkingFrom parent: String? = nil) -> SessionSpec {
+        switch kind {
+        case .shell:
+            return SessionSpec(size: defaultSize, program: shell)
+        case .agent(let agent):
+            return SessionSpec(
+                size: defaultSize,
+                workingDirectory: FileManager.default.currentDirectoryPath,
+                agent: agent,
+                agentHelperPath: Self.hookHelperPath,
+                agentResumeID: parent
+            )
+        }
+    }
+
+    /// The bundled `newt-hook`, beside this executable.
+    ///
+    /// Resolved on this side because knowing where a bundle keeps its
+    /// executables is the shell's job. `nil` when it is missing, which starts
+    /// the agent with no hooks rather than pointing Claude Code at a command
+    /// that does not exist — every tool call would then run a missing program.
+    static let hookHelperPath: String? = {
+        guard let executable = Bundle.main.executableURL else { return nil }
+        let candidate = executable.deletingLastPathComponent().appendingPathComponent("newt-hook")
+        return FileManager.default.isExecutableFile(atPath: candidate.path)
+            ? candidate.path : nil
+    }()
 
     /// Grid size a new tab should start at, so it matches the window rather
     /// than the size the window was created with.
@@ -269,6 +304,24 @@ final class TerminalWindowController: NSWindowController, NSWindowDelegate {
         } catch {
             reportPaneFailure(error)
         }
+    }
+
+    /// New tab running Claude Code.
+    @objc func newAgentTab(_ sender: Any?) {
+        do {
+            try addTab(kind: .agent(.claude), under: nil, select: true)
+        } catch {
+            reportPaneFailure(error)
+        }
+    }
+
+    /// Greyed out when the agent is not installed, rather than offered and
+    /// then failing once someone picks it.
+    @objc func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        if item.action == #selector(newAgentTab(_:)) {
+            return newt_agent_available(AgentKind.claude.rawValue)
+        }
+        return true
     }
 
     @objc func closeSelectedTab(_ sender: Any?) {

@@ -20,7 +20,7 @@
 
 use std::time::{Duration, Instant};
 
-use newt_agent::{detect, AgentKind};
+use newt_agent::{detect, AgentBridge, AgentKind};
 use newt_core::input::{Key, KeyEvent};
 use newt_core::{Direction, SessionConfig, SizeInCells};
 
@@ -46,6 +46,7 @@ fn main() {
         exec_mode,
         agent,
         list_agents,
+        watch_seconds,
     } = parse_args(&args);
 
     if list_agents {
@@ -55,15 +56,22 @@ fn main() {
 
     // An agent replaces the program, its arguments, and its environment, so it
     // is resolved before the config rather than merged into one.
-    let (shell, program_args, env, exec_mode, agent_cwd) = match &agent {
+    let (shell, program_args, env, exec_mode, agent_cwd, mailbox) = match &agent {
         Some(name) => match resolve_agent(name) {
-            Ok(plan) => (Some(plan.program), plan.args, plan.env, true, plan.cwd),
+            Ok((plan, mailbox)) => (
+                Some(plan.program),
+                plan.args,
+                plan.env,
+                true,
+                plan.cwd,
+                mailbox,
+            ),
             Err(message) => {
                 eprintln!("newt: {message}");
                 std::process::exit(1);
             }
         },
-        None => (shell, program_args, env, exec_mode, None),
+        None => (shell, program_args, env, exec_mode, None, None),
     };
 
     let config = SessionConfig {
@@ -72,6 +80,7 @@ fn main() {
         args: program_args,
         env,
         cwd: agent_cwd,
+        agent_mailbox: mailbox,
         ..SessionConfig::default()
     };
 
@@ -119,7 +128,18 @@ fn main() {
             eprintln!("newt: {e}");
             std::process::exit(1);
         }
-        settle(&session, WaitFor::Quiet, quiet_period);
+        match watch_seconds {
+            // Settling waits for the screen to go *quiet*, which for an agent
+            // means waiting for the whole turn to finish — by which time every
+            // transition worth watching has already happened. A short fixed
+            // pause instead, just enough for the TUI to take the keystroke.
+            Some(_) => std::thread::sleep(Duration::from_millis(400)),
+            None => settle(&session, WaitFor::Quiet, quiet_period),
+        }
+    }
+
+    if let Some(seconds) = watch_seconds {
+        watch_agent(&session, seconds);
     }
 
     if let Some(new_size) = resize_to {
@@ -245,6 +265,8 @@ struct Args {
     agent: Option<String>,
     /// Print the installed agents and exit.
     list_agents: bool,
+    /// Seconds to report agent state changes for, before dumping the grid.
+    watch_seconds: Option<u64>,
 }
 
 /// Print every agent newt can find, with the absolute path it resolved to.
@@ -271,8 +293,21 @@ fn print_installed_agents() {
     }
 }
 
-/// Resolve an agent by name into a program, argv, and environment.
-fn resolve_agent(name: &str) -> Result<newt_agent::LaunchPlan, String> {
+/// The `newt-hook` helper, as a sibling of this executable.
+///
+/// The same rule the app bundle follows: whoever built the binary put the
+/// helper next to it, so nothing has to search. `None` when it is absent,
+/// which registers no hooks rather than pointing Claude Code at a command that
+/// does not exist — every tool call would then run a missing program.
+fn hook_helper() -> Option<std::path::PathBuf> {
+    let candidate = std::env::current_exe().ok()?.parent()?.join("newt-hook");
+    candidate.is_file().then_some(candidate)
+}
+
+/// Resolve an agent by name into a launch plan and a mailbox for its reports.
+fn resolve_agent(
+    name: &str,
+) -> Result<(newt_agent::LaunchPlan, Option<newt_agent::Mailbox>), String> {
     let kind = match name.to_ascii_lowercase().as_str() {
         "claude" => AgentKind::Claude,
         other => return Err(format!("unknown agent {other:?}")),
@@ -281,22 +316,65 @@ fn resolve_agent(name: &str) -> Result<newt_agent::LaunchPlan, String> {
     let program =
         detect::find(kind).ok_or_else(|| format!("{} is not installed", kind.display_name()))?;
 
-    let runtime_dir = std::env::temp_dir().join(format!("newt-cli-{}", std::process::id()));
+    // A missing bridge is not fatal: the agent runs and simply reports nothing.
+    let bridge = AgentBridge::shared();
+    let token = bridge.map(|_| AgentBridge::new_token());
+    let mailbox = match (bridge, &token) {
+        (Some(bridge), Some(token)) => Some(bridge.register(token.clone())),
+        _ => None,
+    };
 
-    newt_agent::plan(&newt_agent::LaunchRequest {
+    let helper = hook_helper();
+    if helper.is_none() {
+        eprintln!("newt: newt-hook is not beside this binary; no state will be reported");
+    }
+
+    let runtime_dir = std::env::temp_dir()
+        .join("newt-cli")
+        .join(token.clone().unwrap_or_else(|| "no-bridge".to_string()));
+
+    let plan = newt_agent::plan(&newt_agent::LaunchRequest {
         kind,
         program,
         cwd: std::env::current_dir().ok(),
         fork_from: None,
-        // No hooks yet: the helper and the bridge that receives it are Phase
-        // 12. Registering hooks pointing at a binary that does not exist would
-        // make every tool call in the user's session run a missing command.
-        hook_helper: None,
+        hook_helper: helper.filter(|_| bridge.is_some()),
         runtime_dir,
-        socket_path: None,
-        session_token: None,
+        socket_path: bridge.map(|b| b.socket_path().to_path_buf()),
+        session_token: token,
     })
-    .map_err(|e| format!("could not prepare the agent launch: {e}"))
+    .map_err(|e| format!("could not prepare the agent launch: {e}"))?;
+
+    Ok((plan, mailbox))
+}
+
+/// Print the session's agent metadata whenever it changes.
+///
+/// The headless equivalent of watching the sidebar, and what proves the hook
+/// path end to end without a window: the state table can be checked against a
+/// real Claude Code session rather than against fixtures alone.
+fn watch_agent(session: &newt_core::Session, seconds: u64) {
+    let deadline = Instant::now() + Duration::from_secs(seconds);
+    let mut last = String::new();
+
+    while Instant::now() < deadline && !session.has_exited() {
+        let metadata = session.metadata();
+        let line = format!(
+            "state={:?} model={} in={} out={} cost_micros={} title={} id={}",
+            metadata.agent_state,
+            metadata.model.as_deref().unwrap_or("-"),
+            metadata.input_tokens,
+            metadata.output_tokens,
+            metadata.cost_micros,
+            metadata.agent_title.as_deref().unwrap_or("-"),
+            metadata.agent_session_id.as_deref().unwrap_or("-"),
+        );
+        if line != last {
+            eprintln!("[agent] {line}");
+            last = line;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
 }
 
 fn parse_args(args: &[String]) -> Args {
@@ -313,6 +391,7 @@ fn parse_args(args: &[String]) -> Args {
     let mut exec_mode = false;
     let mut agent: Option<String> = None;
     let mut list_agents = false;
+    let mut watch_seconds: Option<u64> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -364,6 +443,10 @@ fn parse_args(args: &[String]) -> Args {
                 list_agents = true;
                 i += 1;
             }
+            "--watch" => {
+                watch_seconds = args.get(i + 1).and_then(|v| v.parse().ok()).or(Some(30));
+                i += 2;
+            }
             "--trace" => {
                 trace = true;
                 i += 1;
@@ -408,5 +491,6 @@ fn parse_args(args: &[String]) -> Args {
         exec_mode,
         agent,
         list_agents,
+        watch_seconds,
     }
 }

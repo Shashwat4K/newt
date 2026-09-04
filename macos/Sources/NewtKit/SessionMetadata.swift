@@ -25,19 +25,32 @@ public struct SessionMetadata: Equatable, Sendable {
     public var costMicros: UInt64
     public var agentState: AgentState
     public var model: String?
+    /// The agent's own name for this session — Claude Code's `ai-title`.
+    ///
+    /// Kept apart from the terminal's OSC title so a row can fall back from
+    /// one to the other instead of letting them overwrite each other.
+    public var agentTitle: String?
+    /// The agent's session identifier, as the agent reported it.
+    ///
+    /// Learned, never assigned; a child tab forks from this.
+    public var agentSessionID: String?
 
     public init(
         inputTokens: UInt64 = 0,
         outputTokens: UInt64 = 0,
         costMicros: UInt64 = 0,
         agentState: AgentState = .unknown,
-        model: String? = nil
+        model: String? = nil,
+        agentTitle: String? = nil,
+        agentSessionID: String? = nil
     ) {
         self.inputTokens = inputTokens
         self.outputTokens = outputTokens
         self.costMicros = costMicros
         self.agentState = agentState
         self.model = model
+        self.agentTitle = agentTitle
+        self.agentSessionID = agentSessionID
     }
 
     public var totalTokens: UInt64 {
@@ -56,7 +69,11 @@ extension TerminalSession {
             outputTokens: raw.output_tokens,
             costMicros: raw.cost_micros,
             agentState: AgentState(rawValue: raw.agent_state) ?? .unknown,
-            model: raw.model.map { String(cString: $0) }
+            // Copied immediately: these borrow session-owned storage that the
+            // next metadata call replaces.
+            model: raw.model.map { String(cString: $0) },
+            agentTitle: raw.agent_title.map { String(cString: $0) },
+            agentSessionID: raw.agent_session_id.map { String(cString: $0) }
         )
     }
 

@@ -52,6 +52,17 @@ pub const NEWT_FLAG_WRAPLINE: u16 = 1 << 12;
 /// Part of the current selection or search match.
 pub const NEWT_FLAG_SELECTED: u16 = 1 << 13;
 
+/// No agent: an ordinary shell.
+///
+/// Deliberately not zero — zero is a real agent kind, and a caller that
+/// zeroes a spec must get "no agent" rather than "Claude Code".
+pub const NEWT_AGENT_KIND_NONE: u8 = 255;
+pub const NEWT_AGENT_KIND_CLAUDE: u8 = 0;
+
+const _: () = {
+    assert!(NEWT_AGENT_KIND_CLAUDE == newt_agent::AgentKind::Claude.as_u8());
+};
+
 pub const NEWT_CURSOR_BLOCK: u8 = 0;
 pub const NEWT_CURSOR_UNDERLINE: u8 = 1;
 pub const NEWT_CURSOR_BEAM: u8 = 2;
@@ -212,6 +223,13 @@ pub struct NewtSession {
     selection: Option<CString>,
     /// Likewise for the model name in metadata.
     model: Option<CString>,
+    /// Likewise for the agent's own title and session id.
+    agent_title: Option<CString>,
+    agent_session_id: Option<CString>,
+    /// Token this session is registered under with the shared bridge, so the
+    /// registration can be dropped when the session is freed. Leaving them
+    /// would leak one map entry per tab for the life of the process.
+    agent_token: Option<String>,
 }
 
 /// Per-session bookkeeping for the UI.
@@ -229,6 +247,15 @@ pub struct NewtSessionMetadata {
     pub agent_state: u8,
     /// Model name, or null. Valid until the next metadata call on this session.
     pub model: *const c_char,
+    /// The agent's own name for this session, or null.
+    ///
+    /// Distinct from the terminal title: a UI falls back from this to the OSC
+    /// title rather than letting one overwrite the other.
+    pub agent_title: *const c_char,
+    /// The agent's session identifier, or null until it reports one.
+    ///
+    /// This is what a child tab forks from.
+    pub agent_session_id: *const c_char,
 }
 
 /// Borrowed view of one frame. See the module docs for lifetimes.
@@ -326,6 +353,21 @@ pub struct NewtSessionSpec {
     pub cwd: NewtBytes,
     /// Value advertised as `TERM`. Empty means `xterm-256color`.
     pub term: NewtBytes,
+    /// One of the `NEWT_AGENT_KIND_*` values.
+    ///
+    /// Anything other than `NEWT_AGENT_KIND_NONE` replaces `program`, `args`
+    /// and `env` with the agent's launch recipe. This is the *only* agent knob
+    /// a caller touches: what `--fork-session` means, where the hooks settings
+    /// file goes, and how the bridge is reached all stay in the core.
+    pub agent_kind: u8,
+    /// Absolute path to the bundled `newt-hook` helper.
+    ///
+    /// Empty registers no hooks — a working agent session with no state
+    /// reporting. The shell resolves this, because knowing where a bundle
+    /// keeps its executables is the shell's job, not the core's.
+    pub agent_helper_path: NewtBytes,
+    /// Agent session to fork from. Empty starts a fresh conversation.
+    pub agent_resume_id: NewtBytes,
 }
 
 /// Start a session.
@@ -428,6 +470,32 @@ pub unsafe extern "C" fn newt_session_open(spec: *const NewtSessionSpec) -> *mut
             config.term = term;
         }
 
+        // An agent replaces the program, arguments and environment wholesale,
+        // so it is resolved after the plain fields rather than merged with
+        // them. A caller asking for an agent is not also choosing a program.
+        let mut token = None;
+        if spec.agent_kind != NEWT_AGENT_KIND_NONE {
+            let helper = text!(spec.agent_helper_path, "agent helper path");
+            let resume = text!(spec.agent_resume_id, "agent resume id");
+
+            match prepare_agent(spec.agent_kind, &config.cwd, helper, resume) {
+                Ok((plan, mailbox, session_token)) => {
+                    config.shell = Some(plan.program);
+                    config.args = plan.args;
+                    config.env = plan.env;
+                    if plan.cwd.is_some() {
+                        config.cwd = plan.cwd;
+                    }
+                    config.agent_mailbox = Some(mailbox);
+                    token = session_token;
+                }
+                Err(message) => {
+                    set_last_error(message);
+                    return std::ptr::null_mut();
+                }
+            }
+        }
+
         match CoreSession::spawn(config) {
             Ok(session) => Box::into_raw(Box::new(NewtSession {
                 session,
@@ -435,6 +503,9 @@ pub unsafe extern "C" fn newt_session_open(spec: *const NewtSessionSpec) -> *mut
                 title: None,
                 selection: None,
                 model: None,
+                agent_title: None,
+                agent_session_id: None,
+                agent_token: token,
             })),
             Err(e) => {
                 set_last_error(e.to_string());
@@ -511,6 +582,17 @@ pub unsafe extern "C" fn newt_session_new(
             ptr: std::ptr::null(),
             len: 0,
         },
+        // Explicitly NONE: this constructor means "a plain shell", and zero
+        // would mean Claude Code.
+        agent_kind: NEWT_AGENT_KIND_NONE,
+        agent_helper_path: NewtBytes {
+            ptr: std::ptr::null(),
+            len: 0,
+        },
+        agent_resume_id: NewtBytes {
+            ptr: std::ptr::null(),
+            len: 0,
+        },
     };
     newt_session_open(&spec)
 }
@@ -523,6 +605,13 @@ pub unsafe extern "C" fn newt_session_new(
 /// `handle` must come from [`newt_session_new`] and not have been freed.
 #[no_mangle]
 pub unsafe extern "C" fn newt_session_free(handle: *mut NewtSession) {
+    if let Some(session) = handle.as_ref() {
+        if let (Some(bridge), Some(token)) =
+            (newt_agent::AgentBridge::shared(), &session.agent_token)
+        {
+            bridge.unregister(token);
+        }
+    }
     if handle.is_null() {
         return;
     }
@@ -845,20 +934,32 @@ pub unsafe extern "C" fn newt_session_metadata(
         }
 
         let metadata = session.session.metadata();
-        session.model = metadata
-            .model
-            .as_ref()
-            .and_then(|model| CString::new(model.as_str()).ok());
+
+        // Cached on the handle so the pointers stay valid until the next call,
+        // which is the lifetime the module docs promise. A `CString` built and
+        // dropped inside this function would hand out a dangling pointer.
+        fn cache(field: &mut Option<CString>, value: Option<&String>) -> *const c_char {
+            *field = value.and_then(|text| CString::new(text.as_str()).ok());
+            field
+                .as_ref()
+                .map_or(std::ptr::null(), |text| text.as_ptr())
+        }
+
+        let model = cache(&mut session.model, metadata.model.as_ref());
+        let agent_title = cache(&mut session.agent_title, metadata.agent_title.as_ref());
+        let agent_session_id = cache(
+            &mut session.agent_session_id,
+            metadata.agent_session_id.as_ref(),
+        );
 
         out.write(NewtSessionMetadata {
             input_tokens: metadata.input_tokens,
             output_tokens: metadata.output_tokens,
             cost_micros: metadata.cost_micros,
             agent_state: metadata.agent_state.as_u8(),
-            model: session
-                .model
-                .as_ref()
-                .map_or(std::ptr::null(), |model| model.as_ptr()),
+            model,
+            agent_title,
+            agent_session_id,
         });
         true
     })
@@ -898,12 +999,20 @@ pub unsafe extern "C" fn newt_session_set_metadata(
             }
         };
 
+        // The agent's own title and session id are reported by the agent, not
+        // set by a caller, so they are carried over rather than cleared. This
+        // setter exists for tests and for injecting synthetic state into
+        // `--render-to`; neither should be able to erase what a live agent
+        // said about itself.
+        let existing = session.session.metadata();
         session.session.set_metadata(SessionMetadata {
             input_tokens,
             output_tokens,
             cost_micros,
             agent_state,
             model,
+            agent_title: existing.agent_title,
+            agent_session_id: existing.agent_session_id,
         });
         true
     })
@@ -1064,6 +1173,76 @@ unsafe fn with_session(handle: *mut NewtSession, f: impl FnOnce(&mut NewtSession
     })
 }
 
+/// Whether an agent CLI is installed and could be launched.
+///
+/// The shell asks this to decide whether to offer an agent at all, rather than
+/// letting a person pick one and then fail.
+///
+/// # Safety
+///
+/// Takes no pointers; safe to call at any time.
+#[no_mangle]
+pub extern "C" fn newt_agent_available(kind: u8) -> bool {
+    match newt_agent::AgentKind::from_u8(kind) {
+        Some(kind) => newt_agent::detect::find(kind).is_some(),
+        None => false,
+    }
+}
+
+/// Resolve an agent into a launch recipe and a mailbox for its reports.
+///
+/// Returns the recipe, the mailbox the bridge will deliver into, and the token
+/// the session is registered under — `None` when no bridge could be started,
+/// in which case the agent still runs and simply reports nothing.
+fn prepare_agent(
+    kind: u8,
+    cwd: &Option<PathBuf>,
+    helper: Option<String>,
+    resume: Option<String>,
+) -> Result<(newt_agent::LaunchPlan, newt_agent::Mailbox, Option<String>), String> {
+    let kind =
+        newt_agent::AgentKind::from_u8(kind).ok_or_else(|| format!("unknown agent kind {kind}"))?;
+
+    let program = newt_agent::detect::find(kind)
+        .ok_or_else(|| format!("{} is not installed", kind.display_name()))?;
+
+    // A missing bridge is not fatal. A terminal that refuses to open a session
+    // because a sidebar indicator is unavailable would be a poor trade, and on
+    // a platform with no transport yet that would be *every* session.
+    let bridge = newt_agent::AgentBridge::shared();
+    let token = bridge.map(|_| newt_agent::AgentBridge::new_token());
+    let mailbox = match (bridge, &token) {
+        (Some(bridge), Some(token)) => bridge.register(token.clone()),
+        _ => std::sync::Arc::new(std::sync::Mutex::new(newt_agent::MetadataUpdate::default())),
+    };
+
+    // Hooks need somewhere to send to; without a bridge there is no point
+    // registering them, and pointing them at a socket nobody serves would add
+    // latency to every tool call for nothing.
+    let hook_helper = match (&bridge, helper) {
+        (Some(_), Some(path)) if !path.is_empty() => Some(PathBuf::from(path)),
+        _ => None,
+    };
+
+    let runtime_dir = std::env::temp_dir()
+        .join("newt")
+        .join(token.clone().unwrap_or_else(|| "no-bridge".to_string()));
+
+    let plan = newt_agent::plan(&newt_agent::LaunchRequest {
+        kind,
+        program,
+        cwd: cwd.clone(),
+        fork_from: resume,
+        hook_helper,
+        runtime_dir,
+        socket_path: bridge.map(|b| b.socket_path().to_path_buf()),
+        session_token: token.clone(),
+    })
+    .map_err(|e| format!("could not prepare the agent launch: {e}"))?;
+
+    Ok((plan, mailbox, token))
+}
+
 /// Read a borrowed byte slice, rejecting invalid UTF-8 rather than guessing.
 ///
 /// An empty slice reads as `None` — the boundary's way of saying "not
@@ -1161,6 +1340,28 @@ mod tests {
         }
     }
 
+    /// The agent half of a spec, meaning "no agent".
+    ///
+    /// Spelled out rather than defaulted: zeroing these fields would ask for
+    /// Claude Code, since kind 0 is a real agent.
+    fn no_agent() -> NewtSessionSpec {
+        NewtSessionSpec {
+            cols: 0,
+            rows: 0,
+            scrollback_lines: 0,
+            program: empty(),
+            args: std::ptr::null(),
+            arg_count: 0,
+            env: std::ptr::null(),
+            env_count: 0,
+            cwd: empty(),
+            term: empty(),
+            agent_kind: NEWT_AGENT_KIND_NONE,
+            agent_helper_path: empty(),
+            agent_resume_id: empty(),
+        }
+    }
+
     /// Read the grid until it contains `needle`, or give up.
     unsafe fn wait_for_text(handle: *mut NewtSession, needle: &str) -> bool {
         let mut snapshot = std::mem::zeroed::<NewtSnapshot>();
@@ -1204,6 +1405,7 @@ mod tests {
                 env_count: env.len(),
                 cwd: empty(),
                 term: empty(),
+                ..no_agent()
             };
 
             let handle = newt_session_open(&spec);
@@ -1228,6 +1430,7 @@ mod tests {
                 env_count: 0,
                 cwd: empty(),
                 term: slice("newt-test-term"),
+                ..no_agent()
             };
 
             let handle = newt_session_open(&spec);
@@ -1253,6 +1456,7 @@ mod tests {
                 env_count: 0,
                 cwd: empty(),
                 term: empty(),
+                ..no_agent()
             };
 
             // A count without the array behind it is the mistake most likely to
@@ -1306,6 +1510,7 @@ mod tests {
                 env_count: 0,
                 cwd: empty(),
                 term: empty(),
+                ..no_agent()
             };
             assert!(newt_session_open(&spec).is_null());
         }

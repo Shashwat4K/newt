@@ -23,8 +23,11 @@ final class TerminalTabController: NSObject {
 
     private let font: TerminalFont
     private let defaultSize: TerminalSize
-    /// Program every pane in this tab runs. `nil` is the login shell.
-    private let shell: String?
+    /// What every pane in this tab runs.
+    ///
+    /// Held rather than rebuilt so a pane added by a split is the same kind of
+    /// thing as the one it was split from.
+    private let spec: SessionSpec
 
     private(set) var panes: [TerminalPaneController] = []
     private(set) var focusedPane: TerminalPaneController?
@@ -44,12 +47,12 @@ final class TerminalTabController: NSObject {
         kind: TabKind,
         font: TerminalFont,
         size: TerminalSize,
-        shell: String? = nil
+        spec: SessionSpec
     ) throws {
         self.id = id
         self.kind = kind
         self.font = font
-        self.shell = shell
+        self.spec = spec
         defaultSize = size
 
         super.init()
@@ -58,7 +61,7 @@ final class TerminalTabController: NSObject {
             font: font,
             cols: size.cols,
             rows: size.rows,
-            shell: shell
+            spec: spec
         )
         contentView.autoresizingMask = [.width, .height]
         contentView.frame = NSRect(origin: .zero, size: font.geometry.pixelSize(for: size))
@@ -78,15 +81,24 @@ final class TerminalTabController: NSObject {
 
     /// What the sidebar draws.
     ///
-    /// Falls back rather than showing nothing: an agent's own title is best, a
-    /// program's OSC title next, and the tab kind last. Phase 13 inserts the
-    /// agent title at the front of this chain.
+    /// Falls back rather than showing nothing: the agent's own name for what
+    /// it is doing is best, the program's OSC title next, and the tab kind
+    /// last. The agent title only appears once the agent reports one, which is
+    /// why the chain exists rather than a single source.
     var displayTitle: String {
+        if let agentTitle = focusedPane?.session.metadata.agentTitle, !agentTitle.isEmpty {
+            return agentTitle
+        }
         if let reportedTitle, !reportedTitle.isEmpty { return reportedTitle }
         switch kind {
         case .shell: return "shell"
         case .agent(let agent): return agent.displayName
         }
+    }
+
+    /// The agent session a child tab would fork from, once one is known.
+    var agentSessionID: String? {
+        focusedPane?.session.metadata.agentSessionID
     }
 
     // MARK: - Activation
@@ -169,11 +181,13 @@ final class TerminalTabController: NSObject {
     func split(vertical: Bool) throws {
         guard let focused = focusedPane, let superview = focused.view.superview else { return }
 
+        // A split of an agent tab starts another agent, not a shell: the pane
+        // is a second view onto the same kind of work.
         let newPane = try TerminalPaneController(
             font: font,
             cols: defaultSize.cols,
             rows: defaultSize.rows,
-            shell: shell
+            spec: spec
         )
 
         let splitView = NSSplitView(frame: focused.view.frame)

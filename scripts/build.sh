@@ -30,6 +30,15 @@ echo "==> swift build ($CONFIG)"
 swift build --package-path "$REPO_ROOT/macos" ${SWIFT_FLAGS[@]+"${SWIFT_FLAGS[@]}"}
 
 BINARY="$REPO_ROOT/macos/.build/$CONFIG/NewtApp"
+HOOK="$REPO_ROOT/core/target/$CONFIG/newt-hook"
+
+# The hook helper is found as a sibling of whichever executable is running, so
+# it is staged next to the debug binary too. Without this, `swift run NewtApp`
+# and the offline renderer register no hooks and agent tabs report no state —
+# a difference between debug and release that would be found late and blamed
+# on the wrong thing.
+echo "==> staging hook helper"
+cp "$HOOK" "$REPO_ROOT/macos/.build/$CONFIG/newt-hook"
 
 if [ "$CONFIG" != "release" ]; then
   echo "==> built $BINARY"
@@ -51,6 +60,9 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 # The bundle executable is named for the product, not the SwiftPM target.
 cp "$BINARY" "$APP/Contents/MacOS/newt"
+# Claude Code runs this on every hook event; it must ship inside the bundle so
+# the path newt hands out stays valid wherever the app is moved.
+cp "$HOOK" "$APP/Contents/MacOS/newt-hook"
 cp "$RESOURCES/Info.plist" "$APP/Contents/Info.plist"
 cp "$RESOURCES/newt.icns" "$APP/Contents/Resources/newt.icns"
 
@@ -58,8 +70,14 @@ echo "==> signing (ad-hoc)"
 # Absolute path on purpose: package managers (conda among them) put their own
 # `codesign` shim earlier on PATH, and it does not take Apple's arguments.
 #
-# Ad-hoc is enough to run locally and needs no Apple Developer account. There is
-# no nested code, so --deep (deprecated anyway) is unnecessary.
+# Ad-hoc is enough to run locally and needs no Apple Developer account.
+#
+# The helper is nested code, so it is signed *first* and the bundle is sealed
+# around it. Sealing first leaves the helper unsigned inside a signed bundle,
+# and `--verify --strict` rejects that. Phase 8 could skip this because there
+# was no nested code; there is now. `--deep` would also do it and is
+# deprecated, so the two invocations are explicit instead.
+/usr/bin/codesign --force --sign - "$APP/Contents/MacOS/newt-hook"
 /usr/bin/codesign --force --sign - "$APP"
 /usr/bin/codesign --verify --strict "$APP"
 

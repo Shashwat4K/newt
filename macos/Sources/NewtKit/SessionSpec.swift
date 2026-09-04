@@ -22,6 +22,20 @@ public struct SessionSpec: Equatable, Sendable {
     public var term: String?
     public var scrollbackLines: UInt32
 
+    /// Agent to run instead of a program.
+    ///
+    /// The only agent knob this side touches. When set, the core resolves the
+    /// executable, writes the hooks settings, starts the bridge, and builds the
+    /// argument list — none of which the shell should know about.
+    public var agent: AgentKind?
+    /// Absolute path to the bundled `newt-hook` helper.
+    ///
+    /// Resolved here because knowing where a bundle keeps its executables is
+    /// the shell's job; the core treats it as an opaque path.
+    public var agentHelperPath: String?
+    /// Agent session to fork from. `nil` starts a fresh conversation.
+    public var agentResumeID: String?
+
     public init(
         size: TerminalSize,
         program: String? = nil,
@@ -29,7 +43,10 @@ public struct SessionSpec: Equatable, Sendable {
         environment: [(name: String, value: String)] = [],
         workingDirectory: String? = nil,
         term: String? = nil,
-        scrollbackLines: UInt32 = 10_000
+        scrollbackLines: UInt32 = 10_000,
+        agent: AgentKind? = nil,
+        agentHelperPath: String? = nil,
+        agentResumeID: String? = nil
     ) {
         self.size = size
         self.program = program
@@ -38,12 +55,17 @@ public struct SessionSpec: Equatable, Sendable {
         self.workingDirectory = workingDirectory
         self.term = term
         self.scrollbackLines = scrollbackLines
+        self.agent = agent
+        self.agentHelperPath = agentHelperPath
+        self.agentResumeID = agentResumeID
     }
 
     public static func == (lhs: SessionSpec, rhs: SessionSpec) -> Bool {
         lhs.size == rhs.size && lhs.program == rhs.program && lhs.arguments == rhs.arguments
             && lhs.workingDirectory == rhs.workingDirectory && lhs.term == rhs.term
-            && lhs.scrollbackLines == rhs.scrollbackLines
+            && lhs.scrollbackLines == rhs.scrollbackLines && lhs.agent == rhs.agent
+            && lhs.agentHelperPath == rhs.agentHelperPath
+            && lhs.agentResumeID == rhs.agentResumeID
             && lhs.environment.count == rhs.environment.count
             && zip(lhs.environment, rhs.environment).allSatisfy { $0 == $1 }
     }
@@ -72,6 +94,8 @@ extension SessionSpec {
         add(program)
         add(workingDirectory)
         add(term)
+        add(agentHelperPath)
+        add(agentResumeID)
         for argument in arguments { add(argument) }
         for variable in environment {
             add(variable.name)
@@ -90,8 +114,11 @@ extension SessionSpec {
                 return NewtBytes(ptr: base + extent.offset, len: UInt(extent.count))
             }
 
-            let argumentSlices = (0..<arguments.count).map { slice(3 + $0) }
-            let environmentStart = 3 + arguments.count
+            // 0..4 are program, cwd, term, helper path, resume id; arguments
+            // and environment follow in the order they were added above.
+            let fixedFields = 5
+            let argumentSlices = (0..<arguments.count).map { slice(fixedFields + $0) }
+            let environmentStart = fixedFields + arguments.count
             let environmentPairs = (0..<environment.count).map { index in
                 NewtEnvVar(
                     key: slice(environmentStart + index * 2),
@@ -111,7 +138,11 @@ extension SessionSpec {
                         env: env.baseAddress,
                         env_count: UInt(env.count),
                         cwd: slice(1),
-                        term: slice(2)
+                        term: slice(2),
+                        // Not zero when absent: zero is Claude Code.
+                        agent_kind: agent?.rawValue ?? UInt8(NEWT_AGENT_KIND_NONE),
+                        agent_helper_path: slice(3),
+                        agent_resume_id: slice(4)
                     )
                     return try withUnsafePointer(to: &spec) { try body($0) }
                 }

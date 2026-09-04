@@ -7,6 +7,7 @@ rust-version.workspace = true
 description = "Portable terminal core for newt: PTY, emulation, screen model, snapshots."
 
 [dependencies]
+newt-agent = { workspace = true }
 alacritty_terminal = { workspace = true }
 portable-pty = { workspace = true }
 vte = { workspace = true }

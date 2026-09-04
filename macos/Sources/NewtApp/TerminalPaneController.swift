@@ -24,13 +24,14 @@ final class TerminalPaneController: NSObject {
     private var lastTitle: String?
     private var lastReportedSize: TerminalSize
 
-    /// - Parameter shell: program to run. `nil` means the user's login shell,
-    ///   which is what a terminal should do. Verification paths pass an
-    ///   explicit one so a check never depends on whose dotfiles are installed.
-    init(font: TerminalFont, cols: UInt16, rows: UInt16, shell: String? = nil) throws {
+    /// - Parameter spec: what to run. A tab builds this from its kind, so a
+    ///   pane never has to know whether it is hosting a shell or an agent.
+    init(font: TerminalFont, cols: UInt16, rows: UInt16, spec: SessionSpec) throws {
         self.font = font
         let initialSize = TerminalSize(cols: cols, rows: rows)
-        session = try TerminalSession(size: initialSize, shell: shell)
+        var spec = spec
+        spec.size = initialSize
+        session = try TerminalSession(spec: spec)
         view = TerminalView(font: font, cols: Int(cols), rows: Int(rows))
         lastReportedSize = initialSize
 

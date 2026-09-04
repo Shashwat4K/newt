@@ -27,13 +27,13 @@ impl AgentKind {
         }
     }
 
-    pub fn as_u8(self) -> u8 {
+    pub const fn as_u8(self) -> u8 {
         match self {
             AgentKind::Claude => 0,
         }
     }
 
-    pub fn from_u8(value: u8) -> Option<Self> {
+    pub const fn from_u8(value: u8) -> Option<Self> {
         match value {
             0 => Some(AgentKind::Claude),
             _ => None,

@@ -12,6 +12,7 @@ crate-type = ["staticlib", "rlib"]
 
 [dependencies]
 newt-core = { workspace = true }
+newt-agent = { workspace = true }
 
 [build-dependencies]
 cbindgen = "0.29"

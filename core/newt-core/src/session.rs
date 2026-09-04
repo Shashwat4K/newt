@@ -66,6 +66,11 @@ pub struct SessionConfig {
     pub scrollback_lines: usize,
     /// Value advertised as `TERM`.
     pub term: String,
+    /// Where an agent driving this session reports its state.
+    ///
+    /// `None` for an ordinary shell. When set, [`Session::metadata`] folds
+    /// whatever has arrived into the metadata before returning it.
+    pub agent_mailbox: Option<newt_agent::Mailbox>,
 }
 
 impl Default for SessionConfig {
@@ -78,6 +83,7 @@ impl Default for SessionConfig {
             cwd: None,
             scrollback_lines: DEFAULT_SCROLLBACK_LINES,
             term: "xterm-256color".to_string(),
+            agent_mailbox: None,
         }
     }
 }
@@ -95,6 +101,8 @@ pub struct Session {
     trace: Option<SharedTrace>,
     /// Bookkeeping for the UI. Not terminal state — nothing here is drawn.
     metadata: Mutex<SessionMetadata>,
+    /// Reports from an agent, folded in when the metadata is read.
+    agent_mailbox: Option<newt_agent::Mailbox>,
 }
 
 impl Session {
@@ -163,6 +171,7 @@ impl Session {
             child_exited,
             trace,
             metadata: Mutex::new(SessionMetadata::default()),
+            agent_mailbox: config.agent_mailbox.clone(),
         })
     }
 
@@ -234,11 +243,29 @@ impl Session {
     // --- metadata ---
 
     /// A copy of this session's metadata.
+    /// This session's metadata, including anything an agent has reported.
+    ///
+    /// Reports are folded in *here*, on read, rather than pushed from the
+    /// bridge's thread. That is what keeps the `CLAUDE.md` rule about
+    /// callbacks intact: the shell polls this exactly as it polls the title
+    /// and the exit flag, and the bridge never blocks on a consumer that is
+    /// busy drawing.
     pub fn metadata(&self) -> SessionMetadata {
-        self.metadata
-            .lock()
-            .expect("metadata mutex poisoned")
-            .clone()
+        let mut metadata = self.metadata.lock().expect("metadata mutex poisoned");
+
+        if let Some(mailbox) = &self.agent_mailbox {
+            if let Ok(mut pending) = mailbox.lock() {
+                if !pending.is_empty() {
+                    metadata.apply(&pending);
+                    // Taken, not left: the update has been folded in, and
+                    // reapplying it would be harmless but pointless work on
+                    // every poll.
+                    *pending = newt_agent::MetadataUpdate::default();
+                }
+            }
+        }
+
+        metadata.clone()
     }
 
     /// Replace this session's metadata.
@@ -476,5 +503,71 @@ mod tests {
         })
         .expect("spawn");
         assert!(!session.has_exited());
+    }
+}
+
+#[cfg(test)]
+mod agent_tests {
+    use super::*;
+    use crate::metadata::AgentState;
+    use newt_agent::{AgentStateHint, MetadataUpdate};
+
+    fn session_with_mailbox() -> (Session, newt_agent::Mailbox) {
+        let mailbox: newt_agent::Mailbox =
+            std::sync::Arc::new(Mutex::new(MetadataUpdate::default()));
+        let session = Session::spawn(SessionConfig {
+            shell: Some("/bin/sh".to_string()),
+            agent_mailbox: Some(std::sync::Arc::clone(&mailbox)),
+            ..SessionConfig::default()
+        })
+        .expect("spawn");
+        (session, mailbox)
+    }
+
+    #[test]
+    fn a_report_in_the_mailbox_shows_up_in_the_metadata() {
+        let (session, mailbox) = session_with_mailbox();
+        assert_eq!(session.metadata().agent_state, AgentState::Unknown);
+
+        *mailbox.lock().unwrap() = MetadataUpdate {
+            agent_state: Some(AgentStateHint::Running),
+            model: Some("claude-opus-5".to_string()),
+            agent_session_id: Some("s-9".to_string()),
+            ..MetadataUpdate::default()
+        };
+
+        let metadata = session.metadata();
+        assert_eq!(metadata.agent_state, AgentState::Running);
+        assert_eq!(metadata.model.as_deref(), Some("claude-opus-5"));
+        assert_eq!(metadata.agent_session_id.as_deref(), Some("s-9"));
+    }
+
+    #[test]
+    fn a_report_is_consumed_and_survives_later_reads() {
+        let (session, mailbox) = session_with_mailbox();
+        *mailbox.lock().unwrap() = MetadataUpdate {
+            agent_state: Some(AgentStateHint::Waiting),
+            ..MetadataUpdate::default()
+        };
+
+        assert_eq!(session.metadata().agent_state, AgentState::Waiting);
+        // Drained, so the UI polling at 5 Hz does no repeated work...
+        assert!(mailbox.lock().unwrap().is_empty());
+        // ...but the state it delivered is not lost.
+        assert_eq!(session.metadata().agent_state, AgentState::Waiting);
+    }
+
+    #[test]
+    fn a_session_with_no_agent_reports_nothing() {
+        let session = Session::spawn(SessionConfig {
+            shell: Some("/bin/sh".to_string()),
+            ..SessionConfig::default()
+        })
+        .expect("spawn");
+
+        // Unknown is deliberately distinct from Idle: a plain shell has no
+        // agent, which is not the same as an agent that is doing nothing.
+        assert_eq!(session.metadata().agent_state, AgentState::Unknown);
+        assert_eq!(session.metadata().agent_session_id, None);
     }
 }

@@ -58,6 +58,61 @@ pub struct SessionMetadata {
     pub agent_state: AgentState,
     /// Model driving this session, if any.
     pub model: Option<String>,
+    /// The agent's own name for what it is doing.
+    ///
+    /// Kept distinct from the terminal's OSC title: they are different facts
+    /// with different lifetimes, and a UI wants to fall back from one to the
+    /// other rather than have them overwrite each other.
+    pub agent_title: Option<String>,
+    /// The agent's session identifier, as reported by the agent itself.
+    ///
+    /// Learned, never assigned — it is what a child tab forks from.
+    pub agent_session_id: Option<String>,
+}
+
+impl SessionMetadata {
+    /// Fold a report from an agent adapter into this metadata.
+    ///
+    /// Every field replaces rather than accumulates; see
+    /// [`newt_agent::MetadataUpdate`] for why that is load-bearing rather than
+    /// stylistic. Absent fields are left alone, so a hook that only knows the
+    /// state does not erase a model the transcript reported.
+    pub fn apply(&mut self, update: &newt_agent::MetadataUpdate) {
+        if let Some(value) = update.input_tokens {
+            self.input_tokens = value;
+        }
+        if let Some(value) = update.output_tokens {
+            self.output_tokens = value;
+        }
+        if let Some(value) = update.cost_micros {
+            self.cost_micros = value;
+        }
+        if let Some(hint) = update.agent_state {
+            self.agent_state = AgentState::from(hint);
+        }
+        if let Some(value) = &update.model {
+            self.model = Some(value.clone());
+        }
+        if let Some(value) = &update.agent_title {
+            self.agent_title = Some(value.clone());
+        }
+        if let Some(value) = &update.agent_session_id {
+            self.agent_session_id = Some(value.clone());
+        }
+    }
+}
+
+impl From<newt_agent::AgentStateHint> for AgentState {
+    fn from(hint: newt_agent::AgentStateHint) -> Self {
+        use newt_agent::AgentStateHint as Hint;
+        match hint {
+            Hint::Unknown => AgentState::Unknown,
+            Hint::Idle => AgentState::Idle,
+            Hint::Running => AgentState::Running,
+            Hint::Waiting => AgentState::Waiting,
+            Hint::Error => AgentState::Error,
+        }
+    }
 }
 
 impl SessionMetadata {
@@ -92,6 +147,52 @@ mod tests {
             ..SessionMetadata::default()
         };
         assert_eq!(metadata.total_tokens(), u64::MAX);
+    }
+
+    #[test]
+    fn applying_an_update_replaces_only_what_it_mentions() {
+        let mut metadata = SessionMetadata {
+            model: Some("claude-opus-5".to_string()),
+            input_tokens: 100,
+            ..SessionMetadata::default()
+        };
+
+        metadata.apply(&newt_agent::MetadataUpdate {
+            agent_state: Some(newt_agent::AgentStateHint::Running),
+            ..Default::default()
+        });
+
+        assert_eq!(metadata.agent_state, AgentState::Running);
+        // A hook knows the state and nothing else; it must not erase what the
+        // transcript reported.
+        assert_eq!(metadata.model.as_deref(), Some("claude-opus-5"));
+        assert_eq!(metadata.input_tokens, 100);
+    }
+
+    #[test]
+    fn applied_token_counts_replace_rather_than_accumulate() {
+        let mut metadata = SessionMetadata::default();
+        let update = newt_agent::MetadataUpdate {
+            input_tokens: Some(500),
+            ..Default::default()
+        };
+
+        metadata.apply(&update);
+        metadata.apply(&update);
+
+        // A forked session re-reads its parent's transcript, so identical
+        // totals arrive twice. Adding would double them.
+        assert_eq!(metadata.input_tokens, 500);
+    }
+
+    #[test]
+    fn every_state_hint_maps_onto_a_state() {
+        use newt_agent::AgentStateHint as Hint;
+        assert_eq!(AgentState::from(Hint::Unknown), AgentState::Unknown);
+        assert_eq!(AgentState::from(Hint::Idle), AgentState::Idle);
+        assert_eq!(AgentState::from(Hint::Running), AgentState::Running);
+        assert_eq!(AgentState::from(Hint::Waiting), AgentState::Waiting);
+        assert_eq!(AgentState::from(Hint::Error), AgentState::Error);
     }
 
     #[test]

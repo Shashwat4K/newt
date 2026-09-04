@@ -39,6 +39,14 @@
 // Part of the current selection or search match.
 #define NEWT_FLAG_SELECTED (1 << 13)
 
+// No agent: an ordinary shell.
+//
+// Deliberately not zero — zero is a real agent kind, and a caller that
+// zeroes a spec must get "no agent" rather than "Claude Code".
+#define NEWT_AGENT_KIND_NONE 255
+
+#define NEWT_AGENT_KIND_CLAUDE 0
+
 #define NEWT_CURSOR_BLOCK 0
 
 #define NEWT_CURSOR_UNDERLINE 1
@@ -172,6 +180,21 @@ typedef struct {
   NewtBytes cwd;
   // Value advertised as `TERM`. Empty means `xterm-256color`.
   NewtBytes term;
+  // One of the `NEWT_AGENT_KIND_*` values.
+  //
+  // Anything other than `NEWT_AGENT_KIND_NONE` replaces `program`, `args`
+  // and `env` with the agent's launch recipe. This is the *only* agent knob
+  // a caller touches: what `--fork-session` means, where the hooks settings
+  // file goes, and how the bridge is reached all stay in the core.
+  uint8_t agent_kind;
+  // Absolute path to the bundled `newt-hook` helper.
+  //
+  // Empty registers no hooks — a working agent session with no state
+  // reporting. The shell resolves this, because knowing where a bundle
+  // keeps its executables is the shell's job, not the core's.
+  NewtBytes agent_helper_path;
+  // Agent session to fork from. Empty starts a fresh conversation.
+  NewtBytes agent_resume_id;
 } NewtSessionSpec;
 
 // An opaque RGB triple. Alpha is deliberately absent: terminal cells are
@@ -256,6 +279,15 @@ typedef struct {
   uint8_t agent_state;
   // Model name, or null. Valid until the next metadata call on this session.
   const char *model;
+  // The agent's own name for this session, or null.
+  //
+  // Distinct from the terminal title: a UI falls back from this to the OSC
+  // title rather than letting one overwrite the other.
+  const char *agent_title;
+  // The agent's session identifier, or null until it reports one.
+  //
+  // This is what a child tab forks from.
+  const char *agent_session_id;
 } NewtSessionMetadata;
 
 #ifdef __cplusplus
@@ -489,6 +521,16 @@ bool newt_session_find(NewtSession *handle,
 //
 // `handle` must be live.
 bool newt_session_scroll_to_bottom(NewtSession *handle);
+
+// Whether an agent CLI is installed and could be launched.
+//
+// The shell asks this to decide whether to offer an agent at all, rather than
+// letting a person pick one and then fail.
+//
+// # Safety
+//
+// Takes no pointers; safe to call at any time.
+bool newt_agent_available(uint8_t kind);
 
 #ifdef __cplusplus
 }  // extern "C"

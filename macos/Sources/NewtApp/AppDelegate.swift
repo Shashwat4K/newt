@@ -120,6 +120,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             action: #selector(TerminalWindowController.newTab(_:)),
             keyEquivalent: "t"
         )
+        menu.addItem(
+            withTitle: "New Claude Code Tab",
+            action: #selector(TerminalWindowController.newAgentTab(_:)),
+            keyEquivalent: "T"
+        )
         menu.addItem(NSMenuItem.separator())
         menu.addItem(
             withTitle: "Split Right",

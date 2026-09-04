@@ -26,3 +26,11 @@ pub mod launch;
 
 pub use kind::AgentKind;
 pub use launch::{plan, LaunchPlan, LaunchRequest};
+
+pub mod bridge;
+pub mod hooks;
+pub mod ipc;
+pub mod update;
+
+pub use bridge::{AgentBridge, Mailbox};
+pub use update::{AgentStateHint, MetadataUpdate};
