@@ -442,7 +442,10 @@ mod tests {
         // HOME breaks in ways that look nothing like a terminal bug.
         let screen = screen_after(SessionConfig {
             shell: Some("/bin/sh".to_string()),
-            args: vec!["-c".to_string(), "printf %s \"${HOME:-missing}\"".to_string()],
+            args: vec![
+                "-c".to_string(),
+                "printf %s \"${HOME:-missing}\"".to_string(),
+            ],
             env: vec![("NEWT_UNRELATED".to_string(), "1".to_string())],
             ..SessionConfig::default()
         });

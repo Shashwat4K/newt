@@ -8,3 +8,4 @@ description = "Headless driver for newt-core; exercises the terminal with no UI.
 
 [dependencies]
 newt-core = { workspace = true }
+newt-agent = { workspace = true }

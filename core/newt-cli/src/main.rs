@@ -11,9 +11,16 @@
 //! instead of typed at a shell prompt:
 //!
 //!     cargo run -p newt-cli -- --env FOO=bar -- /bin/sh -c 'echo $FOO'
+//!
+//! `--agents` lists the agent CLIs installed here; `--agent claude` starts one
+//! in the grid, which is how the launch recipe is exercised without a window:
+//!
+//!     cargo run -p newt-cli -- --agents
+//!     cargo run -p newt-cli -- --agent claude --settle 3000
 
 use std::time::{Duration, Instant};
 
+use newt_agent::{detect, AgentKind};
 use newt_core::input::{Key, KeyEvent};
 use newt_core::{Direction, SessionConfig, SizeInCells};
 
@@ -37,13 +44,34 @@ fn main() {
         program_args,
         env,
         exec_mode,
+        agent,
+        list_agents,
     } = parse_args(&args);
+
+    if list_agents {
+        print_installed_agents();
+        return;
+    }
+
+    // An agent replaces the program, its arguments, and its environment, so it
+    // is resolved before the config rather than merged into one.
+    let (shell, program_args, env, exec_mode, agent_cwd) = match &agent {
+        Some(name) => match resolve_agent(name) {
+            Ok(plan) => (Some(plan.program), plan.args, plan.env, true, plan.cwd),
+            Err(message) => {
+                eprintln!("newt: {message}");
+                std::process::exit(1);
+            }
+        },
+        None => (shell, program_args, env, exec_mode, None),
+    };
 
     let config = SessionConfig {
         size,
         shell,
         args: program_args,
         env,
+        cwd: agent_cwd,
         ..SessionConfig::default()
     };
 
@@ -213,6 +241,62 @@ struct Args {
     env: Vec<(String, String)>,
     /// True when a bare `--` named the program, so nothing is typed at it.
     exec_mode: bool,
+    /// Agent CLI to run instead of a shell, by name.
+    agent: Option<String>,
+    /// Print the installed agents and exit.
+    list_agents: bool,
+}
+
+/// Print every agent newt can find, with the absolute path it resolved to.
+///
+/// The path is the interesting half: a bare name would resolve against
+/// launchd's minimal `PATH` once newt runs as a bundle, so seeing where
+/// detection actually landed is what makes a bundle-only failure diagnosable.
+fn print_installed_agents() {
+    let installed = detect::installed();
+    if installed.is_empty() {
+        println!("no agent CLIs found");
+        println!("searched:");
+        for directory in detect::search_path() {
+            println!("  {}", directory.display());
+        }
+        return;
+    }
+
+    for kind in installed {
+        match detect::find(kind) {
+            Some(path) => println!("{} -> {}", kind.display_name(), path.display()),
+            None => println!("{} -> (vanished between calls)", kind.display_name()),
+        }
+    }
+}
+
+/// Resolve an agent by name into a program, argv, and environment.
+fn resolve_agent(name: &str) -> Result<newt_agent::LaunchPlan, String> {
+    let kind = match name.to_ascii_lowercase().as_str() {
+        "claude" => AgentKind::Claude,
+        other => return Err(format!("unknown agent {other:?}")),
+    };
+
+    let program =
+        detect::find(kind).ok_or_else(|| format!("{} is not installed", kind.display_name()))?;
+
+    let runtime_dir = std::env::temp_dir().join(format!("newt-cli-{}", std::process::id()));
+
+    newt_agent::plan(&newt_agent::LaunchRequest {
+        kind,
+        program,
+        cwd: std::env::current_dir().ok(),
+        fork_from: None,
+        // No hooks yet: the helper and the bridge that receives it are Phase
+        // 12. Registering hooks pointing at a binary that does not exist would
+        // make every tool call in the user's session run a missing command.
+        hook_helper: None,
+        runtime_dir,
+        socket_path: None,
+        session_token: None,
+    })
+    .map_err(|e| format!("could not prepare the agent launch: {e}"))
 }
 
 fn parse_args(args: &[String]) -> Args {
@@ -227,6 +311,8 @@ fn parse_args(args: &[String]) -> Args {
     let mut program_args: Vec<String> = Vec::new();
     let mut env: Vec<(String, String)> = Vec::new();
     let mut exec_mode = false;
+    let mut agent: Option<String> = None;
+    let mut list_agents = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -270,6 +356,14 @@ fn parse_args(args: &[String]) -> Args {
                 }
                 i = args.len();
             }
+            "--agent" => {
+                agent = args.get(i + 1).cloned();
+                i += 2;
+            }
+            "--agents" => {
+                list_agents = true;
+                i += 1;
+            }
             "--trace" => {
                 trace = true;
                 i += 1;
@@ -312,5 +406,7 @@ fn parse_args(args: &[String]) -> Args {
         program_args,
         env,
         exec_mode,
+        agent,
+        list_agents,
     }
 }

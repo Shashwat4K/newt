@@ -1,0 +1,13 @@
+[package]
+name = "newt-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+# Deliberately a leaf: this crate must not reach for `alacritty_terminal`, a
+# PTY, or anything else heavy. Detection, launch recipes, and payload parsing
+# are data work, and keeping the dependency list at one line is what keeps the
+# test suite a fraction of a second and the Linux/Windows port cheap.
+[dependencies]
+serde_json = { workspace = true }
