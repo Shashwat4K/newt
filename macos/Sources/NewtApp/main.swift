@@ -21,6 +21,17 @@ let arguments = Array(CommandLine.arguments.dropFirst())
 let verificationShell: String? =
     arguments.contains("--login-shell") ? nil : OfflineRender.verificationShell
 
+// Headless check that the sidebar divider moves.
+if arguments.contains("--sidebar-check") {
+    application.setActivationPolicy(.prohibited)
+    do {
+        exit(try OfflineRender.runSidebarResizeCheck(fontSize: 13) ? 0 : 1)
+    } catch {
+        FileHandle.standardError.write(Data("newt: \(error)\n".utf8))
+        exit(1)
+    }
+}
+
 // Headless check that a backgrounded tab keeps running. No window, no PNG.
 if arguments.contains("--background-check") {
     application.setActivationPolicy(.prohibited)

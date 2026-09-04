@@ -281,7 +281,8 @@ extension TerminalView {
     /// whether that cell is included in a selection.
     private func isRightHalf(of event: NSEvent) -> Bool {
         let point = convert(event.locationInWindow, from: nil)
-        return point.x.truncatingRemainder(dividingBy: font.cellWidth) > font.cellWidth / 2
+        let x = point.x - TerminalView.contentInsets.left
+        return x.truncatingRemainder(dividingBy: font.cellWidth) > font.cellWidth / 2
     }
 
     /// Cell under the pointer, clamped to the grid so a drag past the edge
@@ -291,8 +292,13 @@ extension TerminalView {
         let size = gridSize
         guard size.cols > 0, size.rows > 0 else { return (0, 0) }
 
-        let col = Int(point.x / font.cellWidth)
-        let row = Int((bounds.height - point.y) / font.cellHeight)
+        // The inverse of `x(ofColumn:)`: padding shifts the grid's origin, so
+        // a click has to be measured from there rather than from the view's
+        // corner, or every hit lands a column early near the left edge.
+        let col = Int((point.x - TerminalView.contentInsets.left) / font.cellWidth)
+        let row = Int(
+            (bounds.height - TerminalView.contentInsets.top - point.y) / font.cellHeight
+        )
         return (
             UInt16(min(max(col, 0), size.cols - 1)),
             UInt16(min(max(row, 0), size.rows - 1))

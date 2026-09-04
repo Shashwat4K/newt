@@ -53,6 +53,22 @@ final class TerminalView: NSView {
         fatalError("newt does not use storyboards")
     }
 
+    /// Breathing room between the view's edge and the first cell.
+    ///
+    /// Without it the leftmost column sits flush against the sidebar divider
+    /// and the top row against the titlebar, which reads as text jammed into a
+    /// corner. The inset is part of the terminal's own background, so it takes
+    /// the grid's colour rather than showing the window through.
+    ///
+    /// It comes out of the drawable area: `gridSize(fitting:)` subtracts it, so
+    /// padding costs columns rather than overflowing them.
+    static let contentInsets = NSEdgeInsets(top: 3, left: 8, bottom: 3, right: 6)
+
+    /// Left edge of a column, in view coordinates.
+    private func x(ofColumn col: Int) -> CGFloat {
+        Self.contentInsets.left + CGFloat(col) * font.cellWidth
+    }
+
     /// Repaint everything on the next frame, ignoring the damage list.
     ///
     /// Set when a pane resumes after its tab was in the background. A suspended
@@ -85,22 +101,39 @@ final class TerminalView: NSView {
     /// Current grid size, for translating mouse positions into cells.
     var gridSize: (cols: Int, rows: Int) { (buffer.cols, buffer.rows) }
 
-    /// Grid size that fits a given pixel size.
+    /// Grid size that fits a given pixel size, once padding is taken out.
     func gridSize(fitting size: NSSize) -> TerminalSize {
-        font.geometry.gridSize(fitting: size)
+        font.geometry.gridSize(fitting: Self.insetSize(size))
+    }
+
+    /// `size` less the content insets, floored at zero.
+    static func insetSize(_ size: NSSize) -> NSSize {
+        NSSize(
+            width: max(0, size.width - contentInsets.left - contentInsets.right),
+            height: max(0, size.height - contentInsets.top - contentInsets.bottom)
+        )
+    }
+
+    /// Pixels needed to hold a grid *and* its padding.
+    static func outsetSize(_ size: NSSize) -> NSSize {
+        NSSize(
+            width: size.width + contentInsets.left + contentInsets.right,
+            height: size.height + contentInsets.top + contentInsets.bottom
+        )
     }
 
     /// Pixel size that exactly holds a grid, for snapping the window so no
     /// partial row or column is left over.
     func pixelSize(for grid: TerminalSize) -> NSSize {
-        font.geometry.pixelSize(for: grid)
+        Self.outsetSize(font.geometry.pixelSize(for: grid))
     }
 
     /// Where the cursor is on screen, for positioning the IME candidate window.
     var cursorRectInView: NSRect {
         NSRect(
-            x: CGFloat(buffer.cursor.col) * font.cellWidth,
-            y: bounds.height - CGFloat(Int(buffer.cursor.row) + 1) * font.cellHeight,
+            x: x(ofColumn: Int(buffer.cursor.col)),
+            y: bounds.height - Self.contentInsets.top
+                - CGFloat(Int(buffer.cursor.row) + 1) * font.cellHeight,
             width: font.cellWidth,
             height: font.cellHeight
         )
@@ -139,7 +172,7 @@ final class TerminalView: NSView {
             context.setFillColor(color)
             context.fill(
                 NSRect(
-                    x: CGFloat(runStart) * font.cellWidth,
+                    x: x(ofColumn: runStart),
                     y: rect(ofRow: row).minY,
                     width: CGFloat(end - runStart) * font.cellWidth,
                     height: font.cellHeight
@@ -175,7 +208,7 @@ final class TerminalView: NSView {
             draw(
                 character: character,
                 cell: cell,
-                at: CGPoint(x: CGFloat(col) * font.cellWidth, y: baselineY),
+                at: CGPoint(x: x(ofColumn: col), y: baselineY),
                 color: cgColor(cell.fg),
                 in: context
             )
@@ -215,7 +248,7 @@ final class TerminalView: NSView {
     /// of the glyph.
     private func drawDecorations(cell: NewtCell, col: Int, row: Int, in context: CGContext) {
         let rowRect = rect(ofRow: row)
-        let x = CGFloat(col) * font.cellWidth
+        let x = x(ofColumn: col)
         let thickness: CGFloat = 1
 
         let underlines =
@@ -258,7 +291,7 @@ final class TerminalView: NSView {
         guard col < buffer.cols, row < buffer.rows else { return }
 
         let cellRect = NSRect(
-            x: CGFloat(col) * font.cellWidth,
+            x: x(ofColumn: col),
             y: rect(ofRow: row).minY,
             width: font.cellWidth,
             height: font.cellHeight
@@ -304,9 +337,11 @@ final class TerminalView: NSView {
     /// Row 0 is at the top; the view is not flipped, so it maps to the highest
     /// y in the frame.
     private func rect(ofRow row: Int) -> NSRect {
+        // Full width on purpose: this is what gets invalidated for a redraw,
+        // and the padding beside a row belongs to that row's background.
         NSRect(
             x: 0,
-            y: bounds.height - CGFloat(row + 1) * font.cellHeight,
+            y: bounds.height - Self.contentInsets.top - CGFloat(row + 1) * font.cellHeight,
             width: bounds.width,
             height: font.cellHeight
         )
@@ -320,8 +355,9 @@ final class TerminalView: NSView {
         let clamped = rect.intersection(bounds)
         guard !clamped.isNull, !clamped.isEmpty, font.cellHeight > 0 else { return 0..<0 }
 
-        let first = Int(((bounds.height - clamped.maxY) / font.cellHeight).rounded(.down))
-        let end = Int(((bounds.height - clamped.minY) / font.cellHeight).rounded(.up))
+        let top = bounds.height - Self.contentInsets.top
+        let first = Int(((top - clamped.maxY) / font.cellHeight).rounded(.down))
+        let end = Int(((top - clamped.minY) / font.cellHeight).rounded(.up))
 
         let lower = max(0, first)
         let upper = min(buffer.rows, end)

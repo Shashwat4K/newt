@@ -232,6 +232,39 @@ enum OfflineRender {
         )
     }
 
+    /// Report whether the sidebar divider actually moves.
+    ///
+    /// Dragging cannot be tested without a person, but "the divider is stuck"
+    /// and "the divider is hard to grab" are different bugs with different
+    /// fixes, and this separates them: if the geometry refuses to change here,
+    /// no amount of aiming at the divider would have helped.
+    static func runSidebarResizeCheck(fontSize: CGFloat) throws -> Bool {
+        let font = TerminalFont(size: fontSize)
+        let controller = try TerminalWindowController(
+            font: font,
+            cols: 80,
+            rows: 24,
+            shell: verificationShell
+        )
+        controller.start()
+        spin(seconds: 1)
+
+        FileHandle.standardError.write(Data((controller.splitDiagnostics + "\n").utf8))
+        let initial = controller.sidebarWidth
+        var results: [(CGFloat, CGFloat)] = []
+        for target in [CGFloat(160), 300, 240] {
+            controller.setSidebarWidth(target)
+            spin(seconds: 0.2)
+            results.append((target, controller.sidebarWidth))
+        }
+
+        FileHandle.standardError.write(
+            Data("sidebar: initial \(Int(initial)); \(results.map { "asked \(Int($0.0)) got \(Int($0.1))" }.joined(separator: ", "))\n".utf8)
+        )
+        // Every request inside the allowed range should land where it was asked.
+        return results.allSatisfy { abs($0.0 - $0.1) < 1 }
+    }
+
     /// Prove that a tab in the background keeps running.
     ///
     /// This is the assumption the whole sidebar rests on: selecting away from a

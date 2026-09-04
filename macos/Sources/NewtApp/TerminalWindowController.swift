@@ -15,18 +15,15 @@ import NewtKit
 /// the responder chain, and a plain `NSObject` is not in it. That was a
 /// Phase-7 finding and it is still load-bearing.
 @MainActor
-final class TerminalWindowController: NSWindowController, NSWindowDelegate {
+final class TerminalWindowController: NSWindowController, NSWindowDelegate, NSSplitViewDelegate {
     /// Kept as a non-optional alongside `NSWindowController.window`, which is
     /// optional and would need unwrapping at every use.
     let hostWindow: NSWindow
 
     private let font: TerminalFont
-    /// `NSSplitViewController` rather than a hand-laid `NSSplitView`: it owns
-    /// the sidebar's minimum and maximum thickness, its collapsed state, the
-    /// standard vibrant sidebar material, and `toggleSidebar(_:)`. Laying the
-    /// two halves out by hand meant setting frames that AppKit then re-derived,
-    /// and the pane area came out a sidebar's width too narrow.
-    private let bodyController = NSSplitViewController()
+    /// Sidebar on the left, grid on the right. See `init` for why this is a
+    /// plain split view rather than an `NSSplitViewController`.
+    private let bodySplit = NSSplitView()
     private let sidebar = SidebarViewController()
     /// Holds the selected tab's pane tree. The find bar floats above it.
     private let paneContainer = NSView()
@@ -41,6 +38,10 @@ final class TerminalWindowController: NSWindowController, NSWindowDelegate {
     private let shell: String?
 
     private static let sidebarWidth: CGFloat = 208
+
+    /// Holds the sidebar at its opening width until the first layout, then is
+    /// released so the divider can be dragged. See where it is deactivated.
+    private var sidebarOpeningWidth: NSLayoutConstraint?
     private static let sidebarMinWidth: CGFloat = 150
     private static let sidebarMaxWidth: CGFloat = 340
 
@@ -51,6 +52,27 @@ final class TerminalWindowController: NSWindowController, NSWindowDelegate {
     /// The selected tab's panes. `OfflineRender` reads this.
     var panes: [TerminalPaneController] { selectedTab?.panes ?? [] }
 
+    /// Move the sidebar divider, for the offscreen resize check.
+    func setSidebarWidth(_ width: CGFloat) {
+        bodySplit.setPosition(width, ofDividerAt: 0)
+        bodySplit.layoutSubtreeIfNeeded()
+        selectedTab?.synchronizeSize(to: paneContainer)
+    }
+
+    var sidebarWidth: CGFloat { sidebar.container.frame.width }
+
+    /// What the split view actually contains, for diagnosing layout.
+    var splitDiagnostics: String {
+        let split = bodySplit
+        let subviews = split.arrangedSubviews
+            .map { "\(Int($0.frame.width))x\(Int($0.frame.height))" }
+            .joined(separator: " | ")
+        return "split \(Int(split.frame.width)) window \(Int(hostWindow.frame.width)) "
+            + "arranged [\(subviews)] "
+            + "sidebarView \(Int(sidebar.container.frame.width)) "
+            + "collapsed \(split.isSubviewCollapsed(sidebar.container))"
+    }
+
     /// Frames of the pieces that decide how much room the grid gets. Reported
     /// by `--render-to --panes`, because a collapsed pane is a layout problem
     /// and the grid sizes alone do not say which view lost its space.
@@ -59,7 +81,7 @@ final class TerminalWindowController: NSWindowController, NSWindowDelegate {
             "\(Int(view.frame.width))x\(Int(view.frame.height))"
         }
         let tabContent = selectedTab.map { size($0.contentView) } ?? "-"
-        return "split \(size(bodyController.view)) sidebar \(size(sidebar.scrollView)) "
+        return "split \(size(bodySplit)) sidebar \(size(sidebar.container)) "
             + "container \(size(paneContainer)) tab \(tabContent)"
     }
 
@@ -98,35 +120,57 @@ final class TerminalWindowController: NSWindowController, NSWindowDelegate {
         // tabs behind the sidebar.
         hostWindow.tabbingMode = .disallowed
 
-        let sidebarPane = NSViewController()
-        // The item's starting thickness comes from its view's frame; without
-        // this the sidebar opens collapsed to `minimumThickness`.
-        sidebar.scrollView.frame = NSRect(
+        // A plain `NSSplitView`, laid out by frames.
+        //
+        // `NSSplitViewController` was tried first and cannot do what a sidebar
+        // needs here. It derives divider positions from constraints, and its
+        // holding priority hugs the sidebar to `minimumThickness` unless
+        // something drives the width. Supplying that width as a constraint
+        // then *blocks the drag*, at every priority above the hugging — the
+        // sidebar opens at the right size and refuses to move. There is no
+        // priority that both sets the opening width and yields to a drag,
+        // because the same constraint does both jobs.
+        //
+        // With a plain split view the subview frames are authoritative,
+        // dragging is native, and `setPosition` works. Phase 9 moved *away*
+        // from this after a layout bug that is now understood: the arranged
+        // subviews' widths did not add up to the split view's own width, so
+        // AppKit re-derived them and the grid came out a sidebar's width too
+        // narrow. Partitioning the width exactly, divider included, is what
+        // that attempt was missing.
+        sidebar.container.translatesAutoresizingMaskIntoConstraints = true
+        paneContainer.translatesAutoresizingMaskIntoConstraints = true
+
+        bodySplit.isVertical = true
+        bodySplit.dividerStyle = .thin
+        bodySplit.frame = contentRect
+        bodySplit.autoresizingMask = [.width, .height]
+
+        // The two halves partition the width exactly: sidebar + divider + grid.
+        let dividerWidth = bodySplit.dividerThickness
+        sidebar.container.frame = NSRect(
             x: 0,
             y: 0,
             width: Self.sidebarWidth,
             height: contentRect.height
         )
-        sidebarPane.view = sidebar.scrollView
-        let sidebarItem = NSSplitViewItem(sidebarWithViewController: sidebarPane)
-        sidebarItem.minimumThickness = Self.sidebarMinWidth
-        sidebarItem.maximumThickness = Self.sidebarMaxWidth
-        sidebarItem.canCollapse = true
-        // The grid takes the space a resize adds; the sidebar keeps its width.
-        sidebarItem.holdingPriority = .defaultHigh
-
-        let contentPane = NSViewController()
+        sidebar.scrollView.frame = sidebar.container.bounds
+        sidebar.container.autoresizingMask = [.height]
         paneContainer.frame = NSRect(
-            x: 0,
+            x: Self.sidebarWidth + dividerWidth,
             y: 0,
-            width: gridSize.width,
+            width: contentRect.width - Self.sidebarWidth - dividerWidth,
             height: contentRect.height
         )
-        contentPane.view = paneContainer
-        let contentItem = NSSplitViewItem(viewController: contentPane)
+        // Only the grid grows with the window; the sidebar keeps its width.
+        paneContainer.autoresizingMask = [.width, .height]
 
-        bodyController.splitViewItems = [sidebarItem, contentItem]
-        bodyController.view.frame = contentRect
+        bodySplit.addArrangedSubview(sidebar.container)
+        bodySplit.addArrangedSubview(paneContainer)
+
+        let container = NSView(frame: contentRect)
+        container.autoresizingMask = [.width, .height]
+        container.addSubview(bodySplit)
 
         findBar.isHidden = true
         findBar.autoresizingMask = [.minXMargin, .minYMargin]
@@ -140,12 +184,13 @@ final class TerminalWindowController: NSWindowController, NSWindowDelegate {
         // focused pane, so it belongs above what it is searching.
         paneContainer.addSubview(findBar)
 
-        hostWindow.contentViewController = bodyController
-        hostWindow.setContentSize(contentRect.size)
+        hostWindow.contentView = container
 
         super.init(window: hostWindow)
 
         hostWindow.delegate = self
+        bodySplit.delegate = self
+        bodySplit.setPosition(Self.sidebarWidth, ofDividerAt: 0)
 
         sidebar.onSelect = { [weak self] id in self?.select(id) }
 
@@ -285,7 +330,10 @@ final class TerminalWindowController: NSWindowController, NSWindowDelegate {
     /// Grid size a new tab should start at, so it matches the window rather
     /// than the size the window was created with.
     private func currentGridSize() -> TerminalSize {
-        let fitted = font.geometry.gridSize(fitting: paneContainer.bounds.size)
+        // Through the view's insets: the grid gets the pane minus its padding,
+        // and sizing a new tab from the raw bounds would make it a column or
+        // two wider than it can actually draw.
+        let fitted = font.geometry.gridSize(fitting: TerminalView.insetSize(paneContainer.bounds.size))
         return fitted.cols >= 20 && fitted.rows >= 5 ? fitted : defaultSize
     }
 
@@ -391,7 +439,42 @@ final class TerminalWindowController: NSWindowController, NSWindowDelegate {
     }
 
     @objc func toggleSidebar(_ sender: Any?) {
-        bodyController.toggleSidebar(sender)
+        let collapsed = bodySplit.isSubviewCollapsed(sidebar.container)
+        bodySplit.setPosition(collapsed ? Self.sidebarWidth : 0, ofDividerAt: 0)
+        selectedTab?.synchronizeSize(to: paneContainer)
+    }
+
+    // MARK: - Split view
+
+    func splitView(
+        _ splitView: NSSplitView,
+        constrainMinCoordinate proposed: CGFloat,
+        ofSubviewAt index: Int
+    ) -> CGFloat {
+        index == 0 ? Self.sidebarMinWidth : proposed
+    }
+
+    func splitView(
+        _ splitView: NSSplitView,
+        constrainMaxCoordinate proposed: CGFloat,
+        ofSubviewAt index: Int
+    ) -> CGFloat {
+        index == 0 ? Self.sidebarMaxWidth : proposed
+    }
+
+    /// A window resize goes to the grid; the sidebar keeps its width.
+    func splitView(_ splitView: NSSplitView, shouldAdjustSizeOfSubview view: NSView) -> Bool {
+        view !== sidebar.container
+    }
+
+    func splitView(_ splitView: NSSplitView, canCollapseSubview view: NSView) -> Bool {
+        view === sidebar.container
+    }
+
+    /// Dragging the divider changes how many columns fit, so the grid has to
+    /// be told. Without this the panes keep their old size until something
+    /// else triggers a resize.
+    func splitViewDidResizeSubviews(_ notification: Notification) {
         selectedTab?.synchronizeSize(to: paneContainer)
     }
 
@@ -471,7 +554,14 @@ final class TerminalWindowController: NSWindowController, NSWindowDelegate {
             width: frameSize.width - chrome.width - reserved,
             height: frameSize.height - chrome.height
         )
-        let snapped = font.geometry.pixelSize(for: font.geometry.gridSize(fitting: proposedGrid))
+        // Padding is not part of the grid, so it is taken off before snapping
+        // and added back after; without that the window creeps by the inset
+        // every time it is dragged.
+        let snapped = TerminalView.outsetSize(
+            font.geometry.pixelSize(
+                for: font.geometry.gridSize(fitting: TerminalView.insetSize(proposedGrid))
+            )
+        )
 
         return NSSize(
             width: snapped.width + chrome.width + reserved,

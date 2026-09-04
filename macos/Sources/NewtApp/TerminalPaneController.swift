@@ -79,7 +79,7 @@ final class TerminalPaneController: NSObject {
     /// A resize reflows the whole scrollback and delivers SIGWINCH, so it only
     /// happens when the grid size actually changed.
     func synchronizeSize() {
-        let grid = font.geometry.gridSize(fitting: view.bounds.size)
+        let grid = view.gridSize(fitting: view.bounds.size)
         guard grid != lastReportedSize else { return }
         lastReportedSize = grid
 

@@ -13,7 +13,7 @@ import NewtKit
 /// `isEqual:`/`hash`, and a reference type gives it pointer identity. Never
 /// hand an outline view a struct.
 @MainActor
-final class TerminalTabController: NSObject {
+final class TerminalTabController: NSObject, NSSplitViewDelegate {
     let id: TabID
     let kind: TabKind
 
@@ -193,6 +193,7 @@ final class TerminalTabController: NSObject {
         let splitView = NSSplitView(frame: focused.view.frame)
         splitView.isVertical = vertical
         splitView.dividerStyle = .thin
+        splitView.delegate = self
         splitView.autoresizingMask = focused.view.autoresizingMask
 
         // Put the split view exactly where the focused pane was, whether that
@@ -279,6 +280,76 @@ final class TerminalTabController: NSObject {
             next.view.window?.makeFirstResponder(next.view)
         }
         onStatusChange?(self)
+    }
+
+    // MARK: - Pane layout
+
+    /// Smallest a pane may be squeezed to, in points.
+    ///
+    /// A pane below this cannot show anything useful, and one at zero is worse
+    /// than useless — it still holds a live session that can never be seen.
+    private static let minimumPaneExtent: CGFloat = 40
+
+    /// Distribute a split view's space explicitly.
+    ///
+    /// `adjustSubviews()` is not used, because its proportional distribution
+    /// needs meaningful previous sizes and does not always have them: during a
+    /// layout pass the container can be momentarily zero-width, and dividing by
+    /// that gave one pane everything and the other nothing. The panes survived
+    /// the split and then collapsed on the next layout, which looked like the
+    /// split failing.
+    ///
+    /// Doing the arithmetic here makes it deterministic and lets a pane keep a
+    /// floor, so neither AppKit nor a drag can squeeze one out of existence.
+    func splitView(_ splitView: NSSplitView, resizeSubviewsWithOldSize oldSize: NSSize) {
+        let views = splitView.arrangedSubviews
+        guard views.count == 2 else {
+            splitView.adjustSubviews()
+            return
+        }
+
+        let vertical = splitView.isVertical
+        let bounds = splitView.bounds
+        let total = vertical ? bounds.width : bounds.height
+        let available = max(0, total - splitView.dividerThickness)
+
+        let first = views[0].frame
+        let second = views[1].frame
+        let previous =
+            vertical
+            ? first.width + second.width
+            : first.height + second.height
+
+        // No usable proportion to preserve: split it down the middle rather
+        // than inventing one.
+        let share =
+            previous > 0
+            ? available * ((vertical ? first.width : first.height) / previous)
+            : available / 2
+
+        let floor = min(Self.minimumPaneExtent, available / 2)
+        let firstExtent = min(max(share.rounded(), floor), available - floor)
+        let secondExtent = available - firstExtent
+
+        if vertical {
+            views[0].frame = NSRect(x: 0, y: 0, width: firstExtent, height: bounds.height)
+            views[1].frame = NSRect(
+                x: firstExtent + splitView.dividerThickness,
+                y: 0,
+                width: secondExtent,
+                height: bounds.height
+            )
+        } else {
+            // Subview 0 is the top one, and the coordinate system is not
+            // flipped, so it is the one with the higher origin.
+            views[0].frame = NSRect(
+                x: 0,
+                y: secondExtent + splitView.dividerThickness,
+                width: bounds.width,
+                height: firstExtent
+            )
+            views[1].frame = NSRect(x: 0, y: 0, width: bounds.width, height: secondExtent)
+        }
     }
 
     func cycleFocus(by offset: Int) {

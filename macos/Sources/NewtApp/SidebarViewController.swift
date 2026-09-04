@@ -10,6 +10,14 @@ import NewtKit
 /// accessibility for no gain, and Story 3's nesting is exactly its use case.
 @MainActor
 final class SidebarViewController: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate {
+    /// What the window puts in its split view.
+    ///
+    /// A visual-effect view behind the list, so the sidebar keeps the standard
+    /// translucent material. `NSSplitViewItem(sidebarWithViewController:)` used
+    /// to supply this for free, but that API could not give a sidebar that both
+    /// opens at a chosen width and resizes, so the material is set here
+    /// instead — see `TerminalWindowController.init`.
+    let container = NSVisualEffectView()
     let scrollView = NSScrollView()
     private let outlineView = NSOutlineView()
 
@@ -51,6 +59,12 @@ final class SidebarViewController: NSObject, NSOutlineViewDataSource, NSOutlineV
         scrollView.hasVerticalScroller = true
         scrollView.drawsBackground = false
         scrollView.autohidesScrollers = true
+
+        container.material = .sidebar
+        container.blendingMode = .behindWindow
+        container.state = .followsWindowActiveState
+        scrollView.autoresizingMask = [.width, .height]
+        container.addSubview(scrollView)
     }
 
     // MARK: - Updating
