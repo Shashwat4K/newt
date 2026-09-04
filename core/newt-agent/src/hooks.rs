@@ -80,18 +80,28 @@ pub fn parse(payload: &[u8]) -> Option<HookOutcome> {
 ///   which reads as "this one needs rescuing" and, because a stale row only
 ///   repainted when something else rebuilt the sidebar, looked like one tab's
 ///   indicator responding to another tab's activity.
-/// - **`SubagentStop` is `Running`, not `Idle`.** A subagent finishing does not
-///   mean the main agent stopped; mapping it to Idle shows a finished tab
-///   mid-task, which is worse than showing nothing.
+/// - **`SubagentStop` changes nothing.** The original choice here was between
+///   `Running` and `Idle`, which was the wrong question: a subagent finishing
+///   is not evidence about the main agent either way, and the event was
+///   observed arriving *after* `Stop`, so treating it as `Running` left every
+///   completed turn pulsing. It is no longer registered at all — a hook that
+///   cannot be interpreted still costs a process launch inside the user's
+///   session.
 ///
 /// `SessionEnd` reports `Unknown` rather than `Idle`: the agent is gone, and
 /// "no agent has reported" is the honest state for a tab whose agent exited.
 fn state_for(event: &str, notification_type: Option<&str>) -> Option<AgentStateHint> {
     match event {
         "SessionStart" => Some(AgentStateHint::Idle),
-        "UserPromptSubmit" | "PreToolUse" | "PostToolUse" | "SubagentStop" => {
-            Some(AgentStateHint::Running)
-        }
+        "UserPromptSubmit" | "PreToolUse" | "PostToolUse" => Some(AgentStateHint::Running),
+        // Deliberately no state. A subagent finishing says nothing reliable
+        // about the main agent, and its ordering against `Stop` is not
+        // guaranteed — observed arriving *after* it, which flipped a finished
+        // tab back to Running until the idle notification cleared it a minute
+        // later. If the main agent is still working, `PreToolUse` and
+        // `PostToolUse` keep it Running; if it has finished, `Stop` already
+        // said so. Neither needs help from here.
+        "SubagentStop" => None,
         "Notification" => Some(match notification_type {
             // The agent is asking for a prompt, which is what an idle agent
             // does. Only this one value is special-cased, because it is the
@@ -152,9 +162,17 @@ mod tests {
     }
 
     #[test]
-    fn a_subagent_finishing_leaves_the_main_agent_running() {
-        // Idle here would show a finished tab while the agent is still working.
-        assert_eq!(state_of("SubagentStop"), Some(AgentStateHint::Running));
+    fn a_subagent_finishing_does_not_touch_the_state() {
+        // It arrives after `Stop` as often as not, so treating it as activity
+        // re-started a tab that had just finished.
+        assert_eq!(state_of("SubagentStop"), None);
+    }
+
+    #[test]
+    fn subagent_stop_is_not_registered() {
+        // Everything registered is acted on, and nothing else is asked for:
+        // each hook costs a process launch inside the user's agent session.
+        assert!(!crate::launch::HOOK_EVENTS.contains(&"SubagentStop"));
     }
 
     #[test]

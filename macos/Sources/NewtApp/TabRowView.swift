@@ -78,6 +78,14 @@ final class TabRowView: NSTableCellView {
     func configure(tab: TerminalTabController, accentIndex: Int, metadata: SessionMetadata) {
         accentBar.layer?.backgroundColor = TabAccent.color(accentIndex).cgColor
         titleLabel.stringValue = tab.displayTitle
+        // What the row is actually about to draw, as opposed to what the core
+        // believes. Off unless asked for; when an indicator looks wrong these
+        // two together say whether the state or the drawing is at fault.
+        if ProcessInfo.processInfo.environment["NEWT_AGENT_TRACE"] != nil {
+            FileHandle.standardError.write(
+                Data("[newt-ui] row \(tab.displayTitle) draws \(metadata.agentState)\n".utf8)
+            )
+        }
         stateDot.update(state: metadata.agentState, kind: tab.kind)
 
         let subtitle = Self.subtitle(for: metadata, kind: tab.kind)

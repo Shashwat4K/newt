@@ -33,9 +33,13 @@ pub const TOKEN_ENV: &str = "NEWT_SESSION_TOKEN";
 /// Hook events newt registers.
 ///
 /// `PostToolUse` is included so a long tool call does not leave a tab looking
-/// idle between `PreToolUse` and the next prompt. `SubagentStop` is included
-/// because it must map to *Running* — the main agent is still working when a
-/// subagent finishes, and treating it as Idle shows a finished tab mid-task.
+/// idle between `PreToolUse` and the next prompt.
+///
+/// `SubagentStop` is deliberately *absent*. It was registered at first on the
+/// theory that a subagent finishing meant the main agent was still working;
+/// in practice it arrives after `Stop`, so it flipped completed turns back to
+/// Running. Since nothing can be concluded from it, asking for it would only
+/// spend a process launch inside the user's session.
 pub const HOOK_EVENTS: &[&str] = &[
     "SessionStart",
     "UserPromptSubmit",
@@ -43,7 +47,6 @@ pub const HOOK_EVENTS: &[&str] = &[
     "PostToolUse",
     "Notification",
     "Stop",
-    "SubagentStop",
     "SessionEnd",
 ];
 
